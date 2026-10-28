@@ -57,3 +57,14 @@ repos:
         types: [python]
         pass_filenames: false
         stages: [pre-push]
+      - id: mutmut
+        name: mutmut (no surviving mutants)
+        entry: >-
+          bash -c 'rm -rf mutants
+          && { log="$(uv run --frozen mutmut run 2>&1)" || { echo "$log"; exit 1; }; }
+          && out="$(uv run --frozen mutmut results)"
+          && { [ -z "$out" ] || { echo "$out"; exit 1; }; }'
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
