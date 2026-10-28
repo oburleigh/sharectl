@@ -15,6 +15,7 @@ htmlcov/
 mutants/
 
 out/
+signal/
 
 docs/
 CLAUDE.md
