@@ -155,7 +155,8 @@ def test_a_reclaim_during_the_cut_runs_at_the_isolated_site_and_reaches_the_clou
         f"cordon {KILIMA} and evict 5 of its 5 pods, each service at or above its min; "
         "fence at 03:05:41, release at 03:08:41 -> applied",
         f"03:05:41 site/mombasa fence@v1 [reclaim.fence-time] fence: {KILIMA} holds 0 pods of "
-        "Share's, deleted; identity revoked; node deleted; disks wiped -> applied",
+        "Share's, deleted; identity revoked; node deleted; disk key revoked; disks wiped "
+        "-> applied",
         f"03:08:41 site/mombasa release@v1 [reclaim.release-time] release-lease: release {KILIMA}: "
         "its owner reclaimed it -> applied",
         "03:13:51 site/mombasa site-rejoin@v1 [cloud.reachable] exit-isolated-mode: data path "
@@ -229,7 +230,8 @@ def test_a_silent_leased_resource_is_drained_fenced_after_grace_and_released() -
         f"cordon {KILIMA} and evict 5 of its 5 pods, each service at or above its min; "
         "fence at 03:10:31, release at 03:10:41 -> applied",
         f"03:10:31 site/mombasa fence@v1 [reclaim.fence-time] fence: {KILIMA} holds 0 pods of "
-        "Share's, deleted; identity revoked; node deleted; disks wiped -> applied",
+        "Share's, deleted; identity revoked; node deleted; disk key revoked; disks wiped "
+        "-> applied",
         f"03:10:41 site/mombasa release@v1 [reclaim.release-time] release-lease: release {KILIMA}: "
         "its owner reclaimed it -> applied",
     ]

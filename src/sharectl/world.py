@@ -134,7 +134,7 @@ class World:  # pylint: disable=too-many-instance-attributes
             self._aaa[site] = answer
 
     def seal(self, resource: str) -> None:
-        """Revoke `resource`'s identity and wipe its disks."""
+        """Revoke `resource`'s identity and its disk key, and wipe its disks."""
         self.sealed.add(resource)
 
     def note(self, text: str) -> None:

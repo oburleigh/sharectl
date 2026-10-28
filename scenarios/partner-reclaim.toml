@@ -30,7 +30,7 @@ controller = "site/mombasa"
 rule = "fence@v1"
 action = "fence"
 outcome = "applied"
-reason_contains = "mba-kilima-01 holds 0 pods of Share's, deleted; identity revoked; node deleted; disks wiped"
+reason_contains = "mba-kilima-01 holds 0 pods of Share's, deleted; identity revoked; node deleted; disk key revoked; disks wiped"
 
 [[expect]]
 at = 2026-10-10T10:08:01Z

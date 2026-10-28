@@ -45,7 +45,7 @@ def test_fences_at_the_fence_time_deleting_what_is_left_then_releases() -> None:
     assert not waiting
     assert lines(fenced) == [
         f"fence {KILIMA} applied: {KILIMA} holds 1 pods of Share's, deleted; identity revoked; "
-        "node deleted; disks wiped"
+        "node deleted; disk key revoked; disks wiped"
     ]
     assert lines(released) == [
         f"release {KILIMA} applied: release {KILIMA}: its owner reclaimed it"
@@ -68,7 +68,7 @@ def test_a_leased_resource_silent_for_confirm_seconds_is_drained_fenced_after_gr
     assert drained[0].limited is True
     assert lines(fenced + released) == [
         f"fence {KILIMA} applied: {KILIMA} holds 0 pods of Share's, deleted; identity revoked; "
-        "node deleted; disks wiped",
+        "node deleted; disk key revoked; disks wiped",
         f"release {KILIMA} applied: release {KILIMA}: its owner reclaimed it",
     ]
     assert [d.limited for d in fenced + released] == [True, True]

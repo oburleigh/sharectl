@@ -80,7 +80,7 @@ boot mombasa: mba-kilima-01 5, mba-srv-1 7, mba-srv-2 7, mba-srv-3 6
 10:00:11 kubernetes recreated telemetry-collector on mba-srv-3
 10:00:11 kubernetes recreated local-log on mba-srv-2
 10:05:01 [phase] the fence time
-10:05:01 site/mombasa fence@v1 [reclaim.fence-time] fence: mba-kilima-01 holds 0 pods of Share's, deleted; identity revoked; node deleted; disks wiped -> applied
+10:05:01 site/mombasa fence@v1 [reclaim.fence-time] fence: mba-kilima-01 holds 0 pods of Share's, deleted; identity revoked; node deleted; disk key revoked; disks wiped -> applied
 10:08:01 [phase] the release time
 10:08:01 site/mombasa release@v1 [reclaim.release-time] release-lease: release mba-kilima-01: its owner reclaimed it -> applied
 summary: generations_applied 0, replays_ignored 0, decisions_merged 3, pods_recreated 5, pods_pending 0, pods_left_on_released 0
@@ -165,7 +165,7 @@ every output file is compared across two runs.
 | `Sdn` | Records when each handoff was configured | Configuration push over NETCONF with confirmed commit, so the node keeps one writer |
 | `Aaa` | Answers from the cloud, or from the local credential copy when the site is cut off | RADIUS at the PoP |
 | `Telemetry` | A counter rising at a fixed rate | SNMP or gNMI polling |
-| Fabric (`world.py`) | Paths, the link, notices, identity revocation and disk wipes | Probes and provider APIs; a wipe is `talosctl reset` on disks encrypted under a key Share's KMS seals |
+| Fabric (`world.py`) | Paths, the link, notices, identity and disk-key revocation, disk wipes | Probes and provider APIs. A partner VM's disks are encrypted under a key Share's KMS seals; the fence revokes that key, then runs `talosctl reset`, so the image cache, logs and volumes are unreadable even if the owner copied the disk first |
 
 ## Why run anything on a partner VM
 

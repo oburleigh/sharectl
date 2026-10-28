@@ -55,7 +55,7 @@ trigger = "reclaim.fence-time"
 condition = "a resource under reclaim at its fence time"
 action = "fence"
 rollback = "none: the owner's deadline forces it"
-reasons = { applied = "$resource holds $pods pods of Share's, deleted; identity revoked; node deleted; disks wiped" }
+reasons = { applied = "$resource holds $pods pods of Share's, deleted; identity revoked; node deleted; disk key revoked; disks wiped" }
 
 [[rule]]
 id = "release"
