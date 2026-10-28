@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -75,6 +76,24 @@ def test_a_reason_that_differs_fails_the_scenario(tmp_path: Path) -> None:
     ]
 
 
+def test_coverage_and_summary_that_differ_fail_the_scenario(tmp_path: Path) -> None:
+    scenario = load_scenario(SCENARIOS / "fibre-cut.toml")
+    coverage = replace(scenario.expect_coverage[0], missing=1)
+    summary = {**scenario.expect_summary, "replays_ignored": 2}
+
+    failures = play(
+        replace(scenario, expect_coverage=(coverage,), expect_summary=summary),
+        INVENTORY,
+        tmp_path,
+        show=lambda _: None,
+    )
+
+    assert failures == [
+        "coverage mba-node-1/eth-1-12 ifHCInOctets: missing 0, expected 1",
+        "summary replays_ignored: 1, expected 2",
+    ]
+
+
 def test_the_partner_vm_pods_are_recreated_on_share_servers_at_the_next_tick(
     tmp_path: Path,
 ) -> None:
@@ -86,6 +105,51 @@ def test_the_partner_vm_pods_are_recreated_on_share_servers_at_the_next_tick(
     ]
     rows = (tmp_path / "partner-reclaim" / "kubernetes.jsonl").read_text().splitlines()
     assert [json.loads(row) for row in rows] == recreated_rows("2026-10-10T10:00:11Z")
+
+
+def test_the_fibre_cut_shows_and_writes_the_reconciliation(tmp_path: Path) -> None:
+    shown: list[str] = []
+    play(load_scenario(SCENARIOS / "fibre-cut.toml"), INVENTORY, tmp_path, show=shown.append)
+    out = tmp_path / "fibre-cut"
+
+    assert "boot mombasa: mba-kilima-01 5, mba-srv-1 7, mba-srv-2 7, mba-srv-3 6" in shown
+    assert [line for line in shown if " aaa at " in line] == [
+        "03:12:21 aaa at mombasa answers from the local credential copy",
+        "09:12:21 aaa at mombasa answers from the cloud",
+    ]
+    assert shown[-3:-1] == [
+        "coverage mba-node-1/eth-1-12 ifHCInOctets: 73 held, 3 resent, 76 expected, 76 unique, "
+        "3 duplicates dropped, 0 missing",
+        "summary: generations_applied 5, replays_ignored 1, decisions_merged 10, pods_recreated 0, "
+        "pods_pending 0, pods_left_on_released 0",
+    ]
+    assert json.loads((out / "coverage.json").read_text()) == [
+        {
+            "handoff": "mba-node-1/eth-1-12",
+            "counter": "ifHCInOctets",
+            "held": 73,
+            "resent": 3,
+            "expected": 76,
+            "unique": 76,
+            "duplicates": 3,
+            "missing": 0,
+        }
+    ]
+    merged = [json.loads(r)["data"] for r in (out / "decisions.jsonl").read_text().splitlines()]
+    keys = [(d["at"], d["decision_id"], d["phase"]) for d in merged]
+    assert keys == sorted(keys)
+    assert len(merged) == 20
+    assert sorted(Counter(d["decision_id"] for d in merged).values()) == [2] * 10
+    events = [json.loads(r)["data"] for r in (out / "events.jsonl").read_text().splitlines()]
+    assert [(e["handoff"], e["generation"], e["agreement"], e["version"]) for e in events] == [
+        ("bcn-node-1/eth-1-12", 8, "atlas-0001", 1),
+        ("mrs-node-1/eth-1-12", 8, "atlas-0001", 1),
+        ("mba-node-1/eth-1-12", 8, "atlas-0001", 1),
+        ("bcn-node-1/eth-1-13", 1, "second-buyer-0001", 1),
+        ("mba-node-1/eth-1-13", 1, "second-buyer-0001", 1),
+    ]
+    site = (out / "site-mba.jsonl").read_text().splitlines()
+    assert [json.loads(r)["sequence"] for r in site] == [str(n) for n in range(1, 15)]
 
 
 def test_a_scenario_name_that_is_not_a_safe_file_name_is_rejected(tmp_path: Path) -> None:
