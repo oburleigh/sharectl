@@ -1,7 +1,7 @@
 """The rules, the guards and the limits: pure functions from a snapshot to decisions."""
 
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from functools import partial
@@ -10,7 +10,6 @@ from string import Template
 
 from sharectl.model import (
     Decision,
-    DesiredState,
     Memory,
     Outcome,
     Pod,
@@ -37,8 +36,6 @@ def decide(state: State) -> tuple[list[Decision], Memory]:
             decision, memory = _guard(state, memory, step)
             if decision:
                 decisions.append(decision)
-    if memory.isolated:
-        memory = replace(memory, queued=_newest(memory.queued.values(), state.inbound))
     return decisions, memory
 
 
@@ -76,18 +73,11 @@ def authorise(state: State, resource: str | None) -> bool:
     )
 
 
-def _newest(*batches: Iterable[DesiredState]) -> dict[str, DesiredState]:
-    """Keep the highest generation received for each handoff."""
-    arrived = sorted((d for batch in batches for d in batch), key=lambda d: d.generation)
-    return dict(sorted({d.handoff: d for d in arrived}.items()))
-
-
 def _track(state: State) -> Memory:
-    """Note when the regions went silent and when a data path came back."""
+    """Note when the regions went silent."""
     memory = state.memory
     down = (memory.down_since or state.now) if state.reachable == 0 else None
-    up = (memory.up_since or state.now) if state.data_up else None
-    return replace(memory, down_since=down, up_since=up)
+    return replace(memory, down_since=down)
 
 
 def _decision(rule: Rule, case: str, subject: str, **facts: object) -> Decision:
@@ -103,39 +93,21 @@ def isolation(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
     """Enter isolated mode once no region has answered on any path for `confirm_seconds`."""
     seconds = _seconds(state, memory.down_since)
     if not memory.isolated and seconds >= state.inventory.params.confirm_seconds:
-        facts = {"reachable": state.reachable, "regions": state.regions, "seconds": int(seconds)}
+        facts = {
+            "reachable": state.reachable,
+            "regions": state.regions,
+            "seconds": int(seconds),
+            "data_links_up": state.data_links_up,
+        }
         yield _decision(rule, "applied", state.site.id, **facts), partial(_isolate, isolated=True)
 
 
 def rejoin(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
     """Leave isolated mode once a data path has been up for `rejoin_stable_seconds`."""
-    seconds = _seconds(state, memory.up_since)
+    seconds = _seconds(state, state.stable_since)
     if memory.isolated and seconds >= state.inventory.params.rejoin_stable_seconds:
-        facts = {"seconds": int(seconds), "records": state.held_records}
-        decision = _decision(
-            rule, "applied", state.site.id, **facts, intervals=state.held_intervals
-        )
+        decision = _decision(rule, "applied", state.site.id, seconds=int(seconds))
         yield decision, partial(_isolate, isolated=False)
-
-
-def desired_state(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
-    """Apply desired state whose generation is above the one applied for its handoff, once.
-
-    On leaving isolation the newest queued generation per handoff is decided first.
-    """
-    if memory.isolated:
-        return
-    applied = dict(memory.applied)
-    for desired in (*memory.queued.values(), *state.inbound):
-        handoff, generation = desired.handoff, desired.generation
-        facts = {"generation": generation, "handoff": handoff, "applied": applied.get(handoff, 0)}
-        if generation <= applied.get(handoff, 0):
-            decision = _decision(rule, "ignored", handoff, **facts)
-            yield replace(decision, outcome=Outcome.IGNORED), partial(_settle, desired=desired)
-            continue
-        applied[handoff] = generation
-        decision = _decision(rule, "applied", handoff, **facts)
-        yield replace(decision, desired=desired), partial(_settle, desired=desired, apply=True)
 
 
 def drain(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
@@ -245,13 +217,6 @@ def _isolate(memory: Memory, *, isolated: bool) -> Memory:
     return replace(memory, isolated=isolated)
 
 
-def _settle(memory: Memory, *, desired: DesiredState, apply: bool = False) -> Memory:
-    """Take desired state off the queue; record its generation as applied if it was."""
-    queued = {h: d for h, d in memory.queued.items() if h != desired.handoff}
-    applied = {**memory.applied, desired.handoff: desired.generation} if apply else memory.applied
-    return replace(memory, queued=queued, applied=applied)
-
-
 def _reclaim(memory: Memory, *, resource: str, reclaim: Reclaim | None) -> Memory:
     """Record a resource's reclaim, or drop it once released."""
     reclaims = {r: c for r, c in memory.reclaims.items() if r != resource}
@@ -265,7 +230,6 @@ def _wait(memory: Memory, *, key: tuple[str, str], blocked: bool = True) -> Memo
 RULES: dict[str, RuleCode] = {
     "site-isolation": isolation,
     "site-rejoin": rejoin,
-    "desired-state": desired_state,
     "drain-on-reclaim": drain,
     "fence": fence,
     "release": release,

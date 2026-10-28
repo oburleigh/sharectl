@@ -5,6 +5,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 lazy from collections.abc import Mapping
 lazy from datetime import datetime
+lazy from ipaddress import IPv4Address
 
 from pydantic import Field
 
@@ -35,6 +36,13 @@ class Outcome(StrEnum):
     APPLIED = "applied"
     IGNORED = "ignored"
     REFUSED = "refused"
+
+
+class Layer(StrEnum):
+    """What a path reports: its link at a site, and over it a session to each other site."""
+
+    LINK = "link"
+    SESSION = "session"
 
 
 class Placement(StrEnum):
@@ -91,10 +99,11 @@ class Resource:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Node:
-    """A network node: ports and counters at a site."""
+    """A network node: ports and counters at a site, and the far-end peer of each path."""
 
     id: str
     site: str
+    peers: Mapping[str, IPv4Address]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -133,6 +142,7 @@ class Params:  # pylint: disable=too-many-instance-attributes
     fence_before_deadline_minutes: int
     release_before_deadline_minutes: int
     max_actions_per_hour: int
+    poll_report_minutes: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -150,7 +160,7 @@ class Rule:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Inventory:  # pylint: disable=too-many-instance-attributes
-    """The estate, the services, the rules and the refusal reasons."""
+    """The estate, the services, the rules, the refusal reasons and the stubs' screen lines."""
 
     network: Network
     telemetry: Telemetry
@@ -162,6 +172,12 @@ class Inventory:  # pylint: disable=too-many-instance-attributes
     params: Params
     rules: tuple[Rule, ...] = Field(alias="rule")
     refusals: Mapping[str, str]
+    lines: Mapping[str, str]
+
+    @property
+    def regions(self) -> tuple[str, ...]:
+        """The ids of the sites of role `region`, in file order."""
+        return tuple(s.id for s in self.sites if s.role is Role.REGION)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -209,9 +225,6 @@ class Memory:  # pylint: disable=too-many-instance-attributes
 
     isolated: bool = False
     down_since: datetime | None = None
-    up_since: datetime | None = None
-    applied: Mapping[str, int] = frozendict()
-    queued: Mapping[str, DesiredState] = frozendict()
     waits: frozenset[tuple[str, str]] = frozenset()
     reclaims: Mapping[str, Reclaim] = frozendict()
     actions: tuple[datetime, ...] = ()
@@ -229,12 +242,10 @@ class State:  # pylint: disable=too-many-instance-attributes
     pods: tuple[Pod, ...]
     regions: int
     reachable: int
-    data_up: bool
+    stable_since: datetime | None
+    data_links_up: int
     notices: Mapping[str, datetime] = frozendict()
     silent: Mapping[str, datetime] = frozendict()
-    inbound: tuple[DesiredState, ...] = ()
-    held_records: int = 0
-    held_intervals: int = 0
     memory: Memory = Memory()
 
 
@@ -250,5 +261,4 @@ class Decision:  # pylint: disable=too-many-instance-attributes
     resource: str | None = None
     limited: bool = False
     page: bool = False
-    desired: DesiredState | None = None
     evict: tuple[Pod, ...] = ()

@@ -6,7 +6,7 @@ start = 2026-10-03T03:00:01Z
 end = 2026-10-03T09:20:01Z
 phases = [
     { at = 2026-10-03T03:02:01Z, title = "Atlas's agreement goes final" },
-    { at = 2026-10-03T03:12:05Z, title = "the fibre cut isolates Mombasa" },
+    { at = 2026-10-03T03:12:05Z, title = "the fibre is cut" },
     { at = 2026-10-03T05:00:01Z, title = "an agreement goes final during the cut" },
     { at = 2026-10-03T09:12:05Z, title = "the link returns" },
 ]
@@ -23,7 +23,7 @@ at = 2026-10-03T03:12:05Z
 kind = "paths-down"
 site = "mombasa"
 to = ["*"]
-paths = ["primary", "oob"]
+paths = ["uplink-a", "uplink-b", "oob"]
 
 [[event]]
 at = 2026-10-03T05:00:01Z
@@ -37,37 +37,13 @@ at = 2026-10-03T09:12:05Z
 kind = "paths-up"
 site = "mombasa"
 to = ["*"]
-paths = ["primary", "oob"]
+paths = ["uplink-a", "uplink-b", "oob"]
 
 [[event]]
 at = 2026-10-03T09:17:21Z
 kind = "resend-desired"
 handoff = "mba-node-1/eth-1-13"
 generation = 1
-
-[[expect]]
-at = 2026-10-03T03:02:11Z
-controller = "site/barcelona"
-rule = "desired-state@v1"
-action = "apply-desired-state"
-outcome = "applied"
-reason_contains = "gen 8 for bcn-node-1/eth-1-12 above applied 7"
-
-[[expect]]
-at = 2026-10-03T03:02:11Z
-controller = "site/marseille"
-rule = "desired-state@v1"
-action = "apply-desired-state"
-outcome = "applied"
-reason_contains = "gen 8 for mrs-node-1/eth-1-12 above applied 7"
-
-[[expect]]
-at = 2026-10-03T03:02:11Z
-controller = "site/mombasa"
-rule = "desired-state@v1"
-action = "apply-desired-state"
-outcome = "applied"
-reason_contains = "gen 8 for mba-node-1/eth-1-12 above applied 7"
 
 [[expect]]
 at = 2026-10-03T03:12:41Z
@@ -86,28 +62,12 @@ outcome = "applied"
 reason_contains = "nothing moves, as a copy in the cloud could not reach the node"
 
 [[expect]]
-at = 2026-10-03T05:00:11Z
-controller = "site/barcelona"
-rule = "desired-state@v1"
-action = "apply-desired-state"
-outcome = "applied"
-reason_contains = "gen 1 for bcn-node-1/eth-1-13 above applied 0"
-
-[[expect]]
 at = 2026-10-03T09:17:11Z
 controller = "site/mombasa"
 rule = "site-rejoin@v1"
 action = "exit-isolated-mode"
 outcome = "applied"
-reason_contains = "data path stable for 300 s; ship 4 records, then 73 intervals"
-
-[[expect]]
-at = 2026-10-03T09:17:11Z
-controller = "site/mombasa"
-rule = "desired-state@v1"
-action = "apply-desired-state"
-outcome = "applied"
-reason_contains = "gen 1 for mba-node-1/eth-1-13 above applied 0"
+reason_contains = "data path stable for 300 s"
 
 [[expect]]
 at = 2026-10-03T09:17:11Z
@@ -117,13 +77,42 @@ action = "resume"
 outcome = "applied"
 reason_contains = "the site rejoined the cloud"
 
-[[expect]]
+# Configuration push, not the controller, applies desired state: its lines are not decisions.
+[[expect_config_push]]
+at = 2026-10-03T03:02:11Z
+handoff = "bcn-node-1/eth-1-12"
+generation = 8
+outcome = "applied"
+
+[[expect_config_push]]
+at = 2026-10-03T03:02:11Z
+handoff = "mrs-node-1/eth-1-12"
+generation = 8
+outcome = "applied"
+
+[[expect_config_push]]
+at = 2026-10-03T03:02:11Z
+handoff = "mba-node-1/eth-1-12"
+generation = 8
+outcome = "applied"
+
+[[expect_config_push]]
+at = 2026-10-03T05:00:11Z
+handoff = "bcn-node-1/eth-1-13"
+generation = 1
+outcome = "applied"
+
+[[expect_config_push]]
+at = 2026-10-03T09:17:11Z
+handoff = "mba-node-1/eth-1-13"
+generation = 1
+outcome = "applied"
+
+[[expect_config_push]]
 at = 2026-10-03T09:17:31Z
-controller = "site/mombasa"
-rule = "desired-state@v1"
-action = "apply-desired-state"
+handoff = "mba-node-1/eth-1-13"
+generation = 1
 outcome = "ignored"
-reason_contains = "gen 1 for mba-node-1/eth-1-13 again: 1 <= applied 1"
 
 [[expect_coverage]]
 handoff = "mba-node-1/eth-1-12"
@@ -138,4 +127,4 @@ missing = 0
 [expect_summary]
 generations_applied = 5
 replays_ignored = 1
-decisions_merged = 10
+decisions_merged = 4

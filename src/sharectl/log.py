@@ -1,8 +1,9 @@
 """The decision log: decisions as `platform.decision` CloudEvents, and their screen lines."""
 
+from typing import Any
 lazy from datetime import datetime
 
-lazy from sharectl.stubs import Record
+type Record = dict[str, Any]
 
 DECISION = "platform.decision"
 CONFIRMED = "circuit.config.confirmed"

@@ -5,7 +5,7 @@ from builders import INVENTORY, KILIMA
 from sharectl.kube import Kube
 from sharectl.model import Pod, Service, Trust
 
-TOLERANT = {"sdn-controller", "aaa", "config-push", "telemetry-collector", "local-log"}
+TOLERANT = {"sdn-controller", "aaa", "config-push", "telemetry-collector"}
 
 
 def cluster(site: str = "mombasa", services: tuple[Service, ...] = INVENTORY.services) -> Kube:
@@ -13,7 +13,7 @@ def cluster(site: str = "mombasa", services: tuple[Service, ...] = INVENTORY.ser
     return Kube(inventory, next(s for s in inventory.sites if s.id == site))
 
 
-def test_boot_places_25_pods_at_mombasa_five_of_them_on_the_partner_vm() -> None:
+def test_boot_places_22_pods_at_mombasa_four_of_them_on_the_partner_vm() -> None:
     kube = cluster()
 
     placed: dict[str, list[str | None]] = {}
@@ -25,14 +25,13 @@ def test_boot_places_25_pods_at_mombasa_five_of_them_on_the_partner_vm() -> None
         "aaa": [srv3, KILIMA],
         "config-push": [srv1, KILIMA],
         "telemetry-collector": [srv2, KILIMA],
-        "local-log": [srv3, KILIMA, srv1],
-        "verifier-probe": [srv2, srv3],
-        "site-controller": [srv1, srv2],
-        "site-postgres": [srv3, srv1, srv2],
-        "spire-server": [srv3, srv1, srv2],
-        "argocd-core": [srv3],
-        "git-mirror": [srv1],
-        "image-mirror": [srv2],
+        "verifier-probe": [srv3, srv1],
+        "site-controller": [srv2, srv3],
+        "site-postgres": [srv1, srv2, srv3],
+        "spire-server": [srv1, srv2, srv3],
+        "argocd-core": [srv1],
+        "git-mirror": [srv2],
+        "image-mirror": [srv3],
     }
     assert [p.service for p in kube.pods if p.standby] == [
         "config-push",
@@ -91,7 +90,7 @@ def test_an_evicted_pod_is_recreated_at_the_next_reconcile_on_a_node_that_lacks_
     kube.cordon(KILIMA)
     kube.evict(on_kilima)
 
-    assert sum(p.resource is None for p in kube.pods) == 5
+    assert sum(p.resource is None for p in kube.pods) == 4
     recreated = kube.reconcile()
 
     assert sorted(p.service for p in recreated) == sorted(TOLERANT)
@@ -115,8 +114,8 @@ def test_deleting_a_node_deletes_its_pods_and_they_are_recreated_elsewhere() -> 
     kube = cluster()
     kube.delete(KILIMA)
 
-    assert sum(p.resource is None for p in kube.pods) == 5
-    assert len(kube.reconcile()) == 5
+    assert sum(p.resource is None for p in kube.pods) == 4
+    assert len(kube.reconcile()) == 4
     assert not [p for p in kube.pods if p.resource in {None, KILIMA}]
 
 

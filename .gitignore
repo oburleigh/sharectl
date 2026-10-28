@@ -20,3 +20,4 @@ signal/
 docs/
 CLAUDE.md
 .claude/
+.env

@@ -1,4 +1,4 @@
-from builders import Memory, lines, state
+from builders import Memory, at, lines, state
 from sharectl.decide import decide
 from sharectl.model import Pod
 
@@ -10,22 +10,23 @@ WAIT = (
 
 
 def test_waits_once_when_the_site_is_isolated_and_resumes_once_on_rejoin() -> None:
-    first, memory = decide(state(0, ISOLATED, reachable=0, data_up=False))
-    again, memory = decide(state(10, memory, reachable=0, data_up=False))
-    _, memory = decide(state(20, memory))
-    back, _ = decide(state(320, memory))
+    first, memory = decide(state(0, ISOLATED, reachable=0, stable_since=None))
+    again, memory = decide(state(10, memory, reachable=0, stable_since=None))
+    _, memory = decide(state(20, memory, stable_since=at(20)))
+    back, _ = decide(state(320, memory, stable_since=at(20)))
 
     assert lines(first) == [WAIT]
+    assert first[0].page is False
     assert not again
     assert lines(back) == [
-        "site-rejoin mombasa applied: data path stable for 300 s; ship 0 records, then 0 intervals",
+        "site-rejoin mombasa applied: data path stable for 300 s",
         "resume mombasa applied: the site rejoined the cloud",
     ]
 
 
 def test_wait_runs_after_isolation_and_sees_it() -> None:
-    _, memory = decide(state(0, reachable=0, data_up=False))
-    decisions, _ = decide(state(30, memory, reachable=0, data_up=False))
+    _, memory = decide(state(0, reachable=0, stable_since=None))
+    decisions, _ = decide(state(30, memory, reachable=0, stable_since=None))
 
     assert [d.rule.id for d in decisions] == ["site-isolation", "wait"]
 

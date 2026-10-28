@@ -11,6 +11,7 @@ resend_overlap = 3                   # intervals the cloud already had, resent o
 fence_before_deadline_minutes = 5
 release_before_deadline_minutes = 2
 max_actions_per_hour = 10            # unforced actions per site
+poll_report_minutes = 5              # a poll that changes nothing is shown this often
 
 [[rule]]
 id = "site-isolation"
@@ -28,16 +29,7 @@ trigger = "cloud.reachable"
 condition = "isolated, and a data path up for rejoin_stable_seconds"
 action = "exit-isolated-mode"
 rollback = "enter-isolated-mode"
-reasons = { applied = "data path stable for $seconds s; ship $records records, then $intervals intervals" }
-
-[[rule]]
-id = "desired-state"
-version = 1
-trigger = "desired-state.received"
-condition = "not isolated, and a generation above the one applied for the handoff"
-action = "apply-desired-state"
-rollback = "none: the next generation supersedes it"
-reasons = { applied = "gen $generation for $handoff above applied $applied; publish circuit.config.confirmed", ignored = "gen $generation for $handoff again: $generation <= applied $applied" }
+reasons = { applied = "data path stable for $seconds s" }
 
 [[rule]]
 id = "drain-on-reclaim"
@@ -87,3 +79,13 @@ reasons = { isolated = "the site rejoined the cloud", pending = "$service has no
 [refusals]
 site = "$resource is not on $site: a controller acts only on its own site"
 cap = "$actions unforced actions in the last hour, the cap is $cap: frozen, a human decides"
+
+# The screen lines of the stubs around the controller: none of them is a decision.
+[lines]
+config_push_applied = "config-push at $site applied gen $generation to $handoff (above applied $applied)"
+config_push_ignored = "config-push at $site ignored gen $generation for $handoff: $generation <= applied $applied"
+kubernetes_recreated = "kubernetes at $site recreated $service on $resource"
+aaa_local = "aaa at $site still answers from the local credential copy"
+poll = "$controller poll $node: $paths; $reachable/$regions regions reachable"
+poll_link_up = "$path bfd $peer up, bgp $sessions/$regions established"
+poll_link_down = "$path bfd $peer down"

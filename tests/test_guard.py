@@ -91,8 +91,8 @@ def test_a_fence_with_no_notice_counts_against_the_cap() -> None:
 
 
 def test_isolation_is_not_limited_by_the_cap() -> None:
-    _, memory = decide(state(0, FULL, reachable=0, data_up=False))
-    decisions, _ = decide(state(30, memory, reachable=0, data_up=False))
+    _, memory = decide(state(0, FULL, reachable=0, stable_since=None))
+    decisions, _ = decide(state(30, memory, reachable=0, stable_since=None))
 
     assert [(d.rule.id, d.outcome) for d in decisions] == [
         ("site-isolation", Outcome.APPLIED),

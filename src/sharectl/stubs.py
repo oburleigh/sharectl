@@ -1,13 +1,13 @@
 """The systems outside the loop, each behind a protocol, with the in-memory fake version 1 uses."""
 
+import itertools
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from datetime import time as dt_time
-from typing import Any, Protocol
+from typing import Protocol
 
-from sharectl.model import DesiredState, Interval
-
-type Record = dict[str, Any]
+from sharectl.log import CONFIRMED, DECISION, Record, envelope, stamp
+from sharectl.model import DesiredState, Interval, Outcome
 
 RATE = 62_500_000
 """The fake counter's rate in bytes per second: a 500 Mbps circuit, full."""
@@ -26,14 +26,36 @@ class Batch:
 
 
 class Sdn(Protocol):
-    """Applies a handoff's desired state.
+    """The SDN controller, each node's only configuration writer.
 
-    Real: configuration push over NETCONF, which takes the lock on the node's candidate
-    datastore and commits by confirmed commit (RFC 6241 §7.5, §8.3).
+    Real: it applies a handoff under the NETCONF lock on the node's candidate datastore
+    (RFC 6241 §7.5) and commits by confirmed commit (§8.4).
     """
 
-    def apply(self, handoff: str, generation: int, at: datetime) -> None:
-        """Apply `generation` to `handoff`."""
+    def apply(self, handoff: str, state: DesiredState, *, at: datetime) -> None:
+        """Apply `state` to `handoff`; returning confirms it, and the same state twice is one."""
+        ...
+
+
+class ConfigPush(Protocol):
+    """Hands each change on the site's stream to the SDN controller, once, by generation.
+
+    Real: configuration push streaming from a desired-state reader in any cell.
+    """
+
+    def pull(self, site: str, *, cloud: Cloud, log: SiteLog, at: datetime) -> None:
+        """Take the changes on `site`'s stream after the last recorded; confirm each to `log`."""
+        ...
+
+
+class SiteLog(Protocol):
+    """Holds a site's records and intervals and ships them to the cloud.
+
+    Real: tables in the site's Postgres and their shipper.
+    """
+
+    def write(self, record: Record) -> None:
+        """Append `record` to the log."""
         ...
 
 
@@ -46,10 +68,10 @@ class Telemetry(Protocol):
 
 
 class Aaa(Protocol):
-    """Answers the credential-cache probe. Real: the RADIUS servers at the PoP."""
+    """Answers the credential-cache probe. Real: FreeRADIUS at the PoP."""
 
-    def answer(self, site: str, *, cloud: bool) -> str:
-        """Say where `site`'s AAA answers from."""
+    def answer(self) -> str:
+        """Say where the site's AAA answers from: always its `local` credential copy."""
         ...
 
 
@@ -60,12 +82,16 @@ class Cloud(Protocol):
     and the reconciler.
     """
 
-    def write(self, agreement: str, version: int, handoffs: list[str]) -> list[DesiredState]:
-        """Write the next generation for each handoff of a final agreement."""
+    def write(self, agreement: str, version: int, handoffs: list[str], *, at: datetime) -> None:
+        """Write the next generation for each handoff of a final agreement to its site's stream."""
         ...
 
-    def resend(self, handoff: str, generation: int) -> DesiredState:
-        """Resend desired state already sent."""
+    def resend(self, handoff: str, generation: int, at: datetime) -> None:
+        """Put desired state already written on its site's stream again."""
+        ...
+
+    def changes(self, site: str, after: int, before: datetime) -> list[tuple[int, DesiredState]]:
+        """Each change on `site`'s stream after sequence `after`, written before `before`."""
         ...
 
     def receive(self, batch: Batch, at: datetime) -> None:
@@ -75,20 +101,133 @@ class Cloud(Protocol):
 
 @dataclass
 class FakeSdn:
-    """Records the generation applied to each handoff and when it was configured."""
+    """Commits a handoff's state when it differs from the one running; returning confirms it."""
 
     configured: dict[str, datetime] = field(default_factory=dict[str, datetime])
-    applied: dict[str, int] = field(default_factory=dict[str, int])
+    running: dict[str, DesiredState] = field(default_factory=dict[str, DesiredState])
+    commits: list[tuple[datetime, str, int]] = field(
+        default_factory=list[tuple[datetime, str, int]]
+    )
 
-    def apply(self, handoff: str, generation: int, at: datetime) -> None:
-        """Apply `generation` to `handoff`; it carries configuration from its first apply."""
-        self.applied[handoff] = generation
-        self.configured.setdefault(handoff, at)
+    def apply(self, handoff: str, state: DesiredState, *, at: datetime) -> None:
+        """Apply `state` to `handoff`; the same state twice changes nothing."""
+        if self.running.get(handoff) != state:
+            self.running[handoff] = state
+            self.configured.setdefault(handoff, at)
+            self.commits.append((at, handoff, state.generation))
+
+
+@dataclass
+class FakeConfigPush:
+    """Hands each change on a site's stream to the SDN controller once, by generation.
+
+    `sequence` holds, per site, the last change recorded: where the stream resumes after a gap.
+    A change is recorded only after the SDN controller confirms it and its confirmation is in the
+    site log, so one interrupted in between comes again; every change taken, a resend included,
+    goes through the generation check.
+    """
+
+    sdn: FakeSdn
+    applied: dict[str, int] = field(default_factory=dict[str, int])
+    sequence: dict[str, int] = field(default_factory=dict[str, int])
+    actions: list[Record] = field(default_factory=list[Record])
+
+    def pull(self, site: str, *, cloud: Cloud, log: SiteLog, at: datetime) -> None:
+        """Take the changes on `site`'s stream after the last recorded; confirm each to `log`."""
+        for sequence, desired in cloud.changes(site, self.sequence.get(site, 0), at):
+            confirmed = self.receive(site, desired, sequence=sequence, at=at)
+            if confirmed:
+                log.write(confirmed)
+            self.record(site, sequence, desired if confirmed else None)
+
+    def receive(
+        self, site: str, desired: DesiredState, *, sequence: int, at: datetime
+    ) -> Record | None:
+        """Hand `desired` to the SDN controller if its generation is above the one applied.
+
+        Returns its confirmation, keyed by site and sequence, or None when it is ignored.
+        """
+        handoff, generation = desired.handoff, desired.generation
+        applied = self.applied.get(handoff, 0)
+        higher = generation > applied
+        self.actions.append(
+            {
+                "time": stamp(at),
+                "sequence": sequence,
+                "handoff": handoff,
+                "generation": generation,
+                "outcome": str(Outcome.APPLIED if higher else Outcome.IGNORED),
+                "applied": applied,
+            }
+        )
+        if not higher:
+            return None
+        self.sdn.apply(handoff, desired, at=at)
+        data = {
+            "handoff": handoff,
+            "generation": generation,
+            "agreement": desired.agreement,
+            "version": desired.version,
+        }
+        key = f"{site}/{sequence}"
+        return envelope(CONFIRMED, source=f"/config-push/site/{site}", key=key, at=at, data=data)
+
+    def record(self, site: str, sequence: int, applied: DesiredState | None) -> None:
+        """Record `sequence` as taken, and the generation `applied` to the SDN controller if any."""
+        self.sequence[site] = sequence
+        if applied:
+            self.applied[applied.handoff] = applied.generation
+
+
+@dataclass
+class FakeSiteLog:
+    """Holds what the site writes until it may ship, then ships it in one batch.
+
+    When shipping resumes after a hold, the batch also resends the last `overlap` intervals of
+    each counter the cloud already had.
+    """
+
+    site: str
+    overlap: int
+    records: list[Record] = field(default_factory=list[Record])
+    intervals: list[Interval] = field(default_factory=list[Interval])
+    holding: bool = False
+    shipped: dict[tuple[str, str], list[Interval]] = field(
+        default_factory=dict[tuple[str, str], list[Interval]]
+    )
+
+    def write(self, record: Record) -> None:
+        """Append `record` to the log."""
+        self.records.append(record)
+
+    def ship(self, *, stable: bool) -> Batch | None:
+        """What to send while a data path is `stable`; None while holding or with nothing held."""
+        if not stable:
+            self.holding = True
+            return None
+        rejoin, self.holding = self.holding, False
+        if not (self.records or self.intervals):
+            return None
+        resent = (
+            tuple(i for s in self.shipped.values() for i in s[-self.overlap :]) if rejoin else ()
+        )
+        batch = Batch(
+            site=self.site,
+            records=tuple(r for r in self.records if r["type"] == DECISION),
+            events=tuple(r for r in self.records if r["type"] != DECISION),
+            intervals=tuple(self.intervals),
+            resent=resent,
+            rejoin=rejoin,
+        )
+        for interval in self.intervals:
+            self.shipped.setdefault((interval.handoff, interval.counter), []).append(interval)
+        self.records, self.intervals = [], []
+        return batch
 
 
 @dataclass
 class FakeTelemetry:
-    """A counter rising at a fixed rate on every handoff the SDN has configured."""
+    """A counter rising at a fixed rate on every handoff the SDN controller has configured."""
 
     sdn: FakeSdn
     poll_minutes: int
@@ -103,11 +242,11 @@ class FakeTelemetry:
 
 
 class FakeAaa:
-    """Answers from the cloud, or from the site's local credential copy when it is cut off."""
+    """Answers from the site's credential copy; nothing in the cloud is in its request path."""
 
-    def answer(self, site: str, *, cloud: bool) -> str:
-        """Say where `site`'s AAA answers from."""
-        return f"aaa at {site} answers from {'the cloud' if cloud else 'the local credential copy'}"
+    def answer(self) -> str:
+        """Say where the site's AAA answers from: always its `local` credential copy."""
+        return "local"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -138,15 +277,17 @@ class FakeCloud:  # pylint: disable=too-many-instance-attributes
     sent: dict[tuple[str, int], DesiredState] = field(
         default_factory=dict[tuple[str, int], DesiredState]
     )
+    streams: dict[str, list[tuple[datetime, DesiredState]]] = field(
+        default_factory=dict[str, list[tuple[datetime, DesiredState]]]
+    )
     records: dict[str, Record] = field(default_factory=dict[str, Record])
-    events: list[Record] = field(default_factory=list[Record])
+    events: dict[str, Record] = field(default_factory=dict[str, Record])
     intervals: dict[tuple[str, str, datetime], Interval] = field(
         default_factory=dict[tuple[str, str, datetime], Interval]
     )
 
-    def write(self, agreement: str, version: int, handoffs: list[str]) -> list[DesiredState]:
+    def write(self, agreement: str, version: int, handoffs: list[str], *, at: datetime) -> None:
         """Write the next generation for each handoff, whatever agreement it carried before."""
-        written: list[DesiredState] = []
         for handoff in handoffs:
             generation = self.generations[handoff] + 1
             self.generations[handoff] = generation
@@ -154,19 +295,27 @@ class FakeCloud:  # pylint: disable=too-many-instance-attributes
                 handoff=handoff, generation=generation, agreement=agreement, version=version
             )
             self.sent[handoff, generation] = desired
-            written.append(desired)
-        return written
+            self.streams.setdefault(self.sites[handoff], []).append((at, desired))
 
-    def resend(self, handoff: str, generation: int) -> DesiredState:
-        """The desired state already sent for `handoff` at `generation`, as a stale cell would."""
-        return self.sent[handoff, generation]
+    def resend(self, handoff: str, generation: int, at: datetime) -> None:
+        """Put desired state already written on its site's stream again, as a stale cell would."""
+        self.streams[self.sites[handoff]].append((at, self.sent[handoff, generation]))
+
+    def changes(self, site: str, after: int, before: datetime) -> list[tuple[int, DesiredState]]:
+        """Each change on `site`'s stream after sequence `after`, written before `before`.
+
+        A site's changes are numbered from 1 in the order written, with no gaps.
+        """
+        stream = enumerate(self.streams.get(site, [])[after:], start=after + 1)
+        due = itertools.takewhile(lambda c: c[1][0] < before, stream)
+        return [(sequence, desired) for sequence, (_, desired) in due]
 
     coverage: list[Coverage] = field(default_factory=list[Coverage])
 
     def receive(self, batch: Batch, at: datetime) -> None:
         """Store a batch by key; when a site rejoins, check the coverage of its handoffs."""
         self.records |= {str(r["id"]): r for r in batch.records}
-        self.events += batch.events
+        self.events |= {str(e["id"]): e for e in batch.events}
         for event in batch.events:
             configured = datetime.fromisoformat(event["time"]) - timedelta.resolution
             first = floor(configured, self.every) + self.every

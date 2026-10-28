@@ -51,6 +51,7 @@ def test_only_a_rejoin_runs_the_check_and_only_for_the_shipping_sites_handoffs()
 def test_a_confirmed_handoff_is_expected_from_the_first_whole_interval_after_it() -> None:
     store = cloud()
     confirmed = {
+        "id": "mombasa/1",
         "type": "circuit.config.confirmed",
         "time": "2026-10-03T03:02:11Z",
         "data": {"handoff": "new", "generation": 1},
@@ -63,15 +64,19 @@ def test_a_confirmed_handoff_is_expected_from_the_first_whole_interval_after_it(
 def test_each_write_to_a_handoff_raises_its_generation() -> None:
     store = cloud()
 
-    first = store.write("a", 1, [H])
-    second = store.write("b", 1, [H])
+    store.write("a", 1, [H], at=T0)
+    store.write("b", 1, [H], at=T0)
 
-    assert [d.generation for d in first + second] == [1, 2]
+    assert [(s, d.generation) for s, d in store.changes("mombasa", 0, T0 + FIVE)] == [
+        (1, 1),
+        (2, 2),
+    ]
 
 
 def test_a_handoff_confirmed_on_a_boundary_is_expected_from_that_interval() -> None:
     store = cloud()
     confirmed = {
+        "id": "mombasa/1",
         "type": "circuit.config.confirmed",
         "time": "2026-10-03T03:05:00Z",
         "data": {"handoff": "new", "generation": 1},

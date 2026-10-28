@@ -1,12 +1,10 @@
-"""A PoP's controller: observe the world, decide, act on its own site, remember, ship its log."""
+"""A PoP's controller: observe the world, decide, act on its own site, remember, log."""
 
-from collections import defaultdict
-lazy from datetime import datetime
+from datetime import datetime, timedelta
 
 from sharectl.decide import decide
-from sharectl.log import CONFIRMED, DECISION, envelope, stamp
-from sharectl.model import Decision, Interval, Memory, Outcome, Role, Site, State
-from sharectl.stubs import Batch, Record
+from sharectl.log import DECISION, Record, envelope, stamp
+from sharectl.model import Decision, Memory, Outcome, Site, State
 lazy from sharectl.world import World
 
 
@@ -17,21 +15,18 @@ class Controller:  # pylint: disable=too-many-instance-attributes
         """Start for `site` at `started`, which every decision id carries."""
         super().__init__()
         self.world, self.site, self.started = world, site, started
-        nodes = {n.id for n in world.inventory.nodes if n.site == site.id}
-        own = [h for h in world.inventory.handoffs if h.node in nodes]
-        self.memory = Memory(applied={h.id: h.generation for h in own})
+        self.memory = Memory()
         self.log: list[Record] = []
-        self._source = f"/controllers/site/{site.id}"
+        self.name = f"site/{site.id}"
+        self._source = f"/controllers/{self.name}"
         self._decisions = 0
-        self._outbox: list[Record] = []
-        self._intervals: list[Interval] = []
-        self._shipped: dict[tuple[str, str], list[Interval]] = defaultdict(list)
+        self._every = timedelta(minutes=world.inventory.params.poll_report_minutes)
+        self._polled: dict[str, tuple[str, datetime]] = {}
 
     def observe(self) -> State:
         """Take a frozen snapshot of the site, what arrived, and the memory."""
         world, site = self.world, self.site.id
-        self._intervals += world.polled(site)
-        reachable, data_up = world.regions_reachable(site)
+        reachable, _ = world.regions_reachable(site)
         resources = tuple(
             r for r in world.inventory.resources if r.site == site and r.id not in world.released
         )
@@ -42,59 +37,66 @@ class Controller:  # pylint: disable=too-many-instance-attributes
             site=self.site,
             resources=resources,
             pods=tuple(world.kubes[site].pods),
-            regions=sum(s.role is Role.REGION for s in world.inventory.sites),
+            regions=len(world.inventory.regions),
             reachable=reachable,
-            data_up=data_up,
+            stable_since=world.stable_since(site),
+            data_links_up=world.data_links_up(site),
             notices={r: t for r, t in world.notices.items() if r in ids},
             silent={r: t for r, t in world.silent.items() if r in ids},
-            inbound=world.take(site),
-            held_records=len(self._outbox),
-            held_intervals=len(self._intervals),
             memory=self.memory,
         )
 
     def step(self) -> None:
-        """One tick: observe, decide, log and act on each decision, remember, ship."""
+        """One tick: observe, decide, log and act on each decision, remember."""
         state = self.observe()
+        self._report(state)
         decisions, memory = decide(state)
         for decision in decisions:
             key = self._record(decision, state, phase="proposed")
             if decision.outcome is Outcome.APPLIED:
                 self.act(decision)
             self._record(decision, state, phase="outcome", key=key)
-        rejoined = self.memory.isolated and not memory.isolated
         self.memory = memory
-        if not memory.isolated:
-            self._ship(rejoined=rejoined)
+
+    def _report(self, state: State) -> None:
+        """Show each node's poll: the first, any that differs, and one every few minutes."""
+        world = self.world
+        paths = world.path_states(self.site.id)
+        for node in (n for n in world.inventory.nodes if n.site == self.site.id):
+            links = "; ".join(
+                world.text(
+                    "poll_link_up" if up else "poll_link_down",
+                    path=path,
+                    peer=node.peers[path],
+                    sessions=sessions,
+                    regions=state.regions,
+                )
+                for path, up, sessions in paths
+            )
+            text = world.text(
+                "poll",
+                controller=self.name,
+                node=node.id,
+                paths=links,
+                reachable=state.reachable,
+                regions=state.regions,
+            )
+            last = self._polled.get(node.id)
+            if last is None or text != last[0] or state.now - last[1] >= self._every:
+                world.note(text)
+                self._polled[node.id] = (text, state.now)
 
     def act(self, decision: Decision) -> None:
         """Carry out an allowed decision on this site."""
         world, kube = self.world, self.world.kubes[self.site.id]
-        match decision.rule.id, decision.resource, decision.desired:
-            case "desired-state", _, desired if desired:
-                world.sdn.apply(desired.handoff, desired.generation, world.now)
-                data = {
-                    "handoff": desired.handoff,
-                    "generation": desired.generation,
-                    "agreement": desired.agreement,
-                    "version": desired.version,
-                }
-                self._outbox.append(
-                    envelope(
-                        CONFIRMED,
-                        source=self._source,
-                        key=f"{desired.handoff}/{desired.generation}",
-                        at=world.now,
-                        data=data,
-                    )
-                )
-            case "drain-on-reclaim", resource, _ if resource:
+        match decision.rule.id, decision.resource:
+            case "drain-on-reclaim", resource if resource:
                 kube.cordon(resource)
                 kube.evict(decision.evict)
-            case "fence", resource, _ if resource:
+            case "fence", resource if resource:
                 kube.delete(resource)
                 world.seal(resource)
-            case "release", resource, _ if resource:
+            case "release", resource if resource:
                 world.released.add(resource)
             case _:  # pragma: no mutate, a match with no arm already does nothing
                 pass
@@ -108,7 +110,7 @@ class Controller:  # pylint: disable=too-many-instance-attributes
             "decision_id": key,
             "phase": phase,
             "at": stamp(state.now),
-            "controller": f"site/{self.site.id}",
+            "controller": self.name,
             "trigger": rule.trigger,
             "observed": {**decision.observed, "isolated": state.memory.isolated},
             "rule": f"{rule.id}@v{rule.version}",
@@ -124,28 +126,5 @@ class Controller:  # pylint: disable=too-many-instance-attributes
         )
         record["sequence"] = str(len(self.log) + 1)
         self.log.append(record)
-        self._outbox.append(record)
+        self.world.site_logs[self.site.id].write(record)
         return key
-
-    def _ship(self, *, rejoined: bool) -> None:
-        """Send what the site holds; on rejoin, resend the last intervals the cloud already had."""
-        overlap = self.world.inventory.params.resend_overlap
-        resent = tuple(i for s in self._shipped.values() for i in s[-overlap:]) if rejoined else ()
-        if not (self._outbox or self._intervals):
-            return
-        records = tuple(r for r in self._outbox if r["type"] == DECISION)
-        events = tuple(r for r in self._outbox if r["type"] != DECISION)
-        self.world.send(
-            self.site.id,
-            Batch(
-                site=self.site.id,
-                records=records,
-                events=events,
-                intervals=tuple(self._intervals),
-                resent=resent,
-                rejoin=rejoined,
-            ),
-        )
-        for interval in self._intervals:
-            self._shipped[interval.handoff, interval.counter].append(interval)
-        self._outbox, self._intervals = [], []

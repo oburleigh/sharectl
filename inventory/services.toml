@@ -83,16 +83,6 @@ spread = "provider"
 roles = ["collects"]
 
 [[service]]
-id = "local-log"
-class = "site-bound"
-active = 3
-standby = 0
-min = 2
-min_trust = "attested"
-tolerates_reclaimable = true
-spread = "provider"
-
-[[service]]
 id = "verifier-probe"
 class = "site-bound"
 active = 1

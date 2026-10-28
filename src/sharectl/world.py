@@ -1,13 +1,24 @@
 """The simulated world: sites and the paths between them, the link, notices and the fakes."""
 
-from collections import defaultdict
 from datetime import datetime, timedelta
+from string import Template
+lazy from collections.abc import Callable, Iterable, Sequence
 
 from sharectl.kube import Kube
-from sharectl.model import DesiredState, Interval, Inventory, Role
-from sharectl.stubs import Batch, FakeAaa, FakeCloud, FakeSdn, FakeTelemetry, Record, floor
+from sharectl.model import Inventory, Layer, Role
+from sharectl.stubs import (
+    Batch,
+    FakeAaa,
+    FakeCloud,
+    FakeConfigPush,
+    FakeSdn,
+    FakeSiteLog,
+    FakeTelemetry,
+    floor,
+)
+lazy from sharectl.log import Record
 
-type Message = tuple[datetime, str, DesiredState | Batch]
+type Message = tuple[datetime, str, Batch]
 
 
 class World:  # pylint: disable=too-many-instance-attributes
@@ -20,12 +31,16 @@ class World:  # pylint: disable=too-many-instance-attributes
         """Boot the estate at `start`: every resource active, every pod placed."""
         super().__init__()
         self.inventory = inventory
-        self.now = start
+        self.now = start  # pragma: no mutate, advance sets the clock before anything reads it
         self._every = timedelta(minutes=inventory.telemetry.poll_minutes)
         boot = floor(start, self._every) - self._every
         node_site = {n.id: n.site for n in inventory.nodes}
         self.kubes = {s.id: Kube(inventory, s) for s in inventory.sites}
-        self.sdn = FakeSdn({h.id: boot for h in inventory.handoffs if h.generation})
+        configured = [h for h in inventory.handoffs if h.generation]
+        self.sdn = FakeSdn(configured={h.id: boot for h in configured})
+        self.config_push = FakeConfigPush(
+            sdn=self.sdn, applied={h.id: h.generation for h in configured}
+        )
         self.telemetry = FakeTelemetry(self.sdn, inventory.telemetry.poll_minutes)
         self.aaa = FakeAaa()
         self.cloud = FakeCloud(
@@ -40,54 +55,108 @@ class World:  # pylint: disable=too-many-instance-attributes
         self.sealed: set[str] = set()
         self.notes: list[tuple[datetime, str]] = []
         self.kubernetes: list[Record] = []
-        self._down: set[tuple[str, str, str]] = set()
+        self._sessions_down: set[tuple[str, str, str]] = set()
+        self._links_down: set[tuple[str, str]] = set()
         self._link: list[Message] = []
-        self._inbox: dict[str, list[DesiredState]] = defaultdict(list)
-        self._polled: dict[str, list[Interval]] = defaultdict(list)
-        self._aaa: dict[str, str] = {}
+        self._cloud: dict[str, bool] = {}
         self._last = start - timedelta(seconds=inventory.params.tick_seconds)
-        self._handoffs: dict[str, list[str]] = defaultdict(list)
-        for handoff in inventory.handoffs:
-            self._handoffs[node_site[handoff.node]].append(handoff.id)
+        pops = [s.id for s in inventory.sites if s.role is Role.POP]
+        self._settle = timedelta(seconds=inventory.params.rejoin_stable_seconds)
+        self._stable = dict.fromkeys(pops, start - self._settle)
+        self.site_logs = {
+            s: FakeSiteLog(site=s, overlap=inventory.params.resend_overlap) for s in pops
+        }
+        self._handoffs = {s: [h for h, at in self.cloud.sites.items() if at == s] for s in pops}
 
-    def cut(self, site: str, to: list[str], paths: list[str], *, down: bool) -> None:
-        """Take `paths` between `site` and the sites in `to` (`*`: every other) down or up."""
+    def cut(
+        self,
+        site: str,
+        to: Sequence[str],
+        paths: Sequence[str],
+        *,
+        down: bool,
+        layer: Layer = Layer.LINK,
+    ) -> None:
+        """Take `paths` at `site` down or up, by `layer`.
+
+        A link carries every session on it; a session cut touches only the sessions to the sites
+        in `to` (`*`: every other).
+        """
+        if layer is Layer.LINK:
+            links = {(site, path) for path in paths}
+            self._links_down = self._links_down | links if down else self._links_down - links
+            return
         others = [s.id for s in self.inventory.sites if s.id != site] if "*" in to else to
         keys = {_path(site, other, path) for other in others for path in paths}
-        self._down = self._down | keys if down else self._down - keys
+        self._sessions_down = self._sessions_down | keys if down else self._sessions_down - keys
 
     def regions_reachable(self, site: str) -> tuple[int, bool]:
-        """How many regions `site` reaches on any path, and whether one is on a data path."""
+        """How many regions `site` reaches on any path, and whether one is on a data path.
+
+        A region is reachable on a path when the path's link is up at both ends and the session
+        between them is up.
+        """
         network = self.inventory.network
         up = [
-            (s.id, path)
-            for s in self.inventory.sites
+            (region, path)
+            for region in self.inventory.regions
             for path in network.paths
-            if s.role is Role.REGION and _path(site, s.id, path) not in self._down
+            if self._reaches(site, region, path)
         ]
         return len({region for region, _ in up}), any(
             path not in network.management_only for _, path in up
         )
 
-    def send(self, site: str, payload: DesiredState | Batch) -> None:
-        """Put a message between `site` and the cloud on the link."""
-        self._link.append((self.now, site, payload))
+    def path_states(self, site: str) -> list[tuple[str, bool, int]]:
+        """Each path at `site`, as its node reports it: the link up, and the regions it reaches."""
+        return [
+            (
+                path,
+                (site, path) not in self._links_down,
+                sum(self._reaches(site, region, path) for region in self.inventory.regions),
+            )
+            for path in self.inventory.network.paths
+        ]
 
-    def take(self, site: str) -> tuple[DesiredState, ...]:
-        """The desired state delivered to `site` since it last took it."""
-        return tuple(self._inbox.pop(site, []))
+    def _reaches(self, site: str, other: str, path: str) -> bool:
+        """Whether `path`'s link is up at both ends and the session between them is up."""
+        return (
+            not {(site, path), (other, path)} & self._links_down
+            and _path(site, other, path) not in self._sessions_down
+        )
 
-    def polled(self, site: str) -> tuple[Interval, ...]:
-        """The intervals `site`'s collectors closed since it last took them."""
-        return tuple(self._polled.pop(site, []))
+    def data_links_up(self, site: str) -> int:
+        """How many of `site`'s data paths have their link up."""
+        network = self.inventory.network
+        data = [p for p in network.paths if p not in network.management_only]
+        return sum((site, path) not in self._links_down for path in data)
 
-    def advance(self, now: datetime) -> None:
-        """Move to `now`: deliver the link, let Kubernetes reconcile, poll, probe AAA."""
+    def send(self, site: str, batch: Batch) -> None:
+        """Put a batch from `site` to the cloud on the link."""
+        self._link.append((self.now, site, batch))
+
+    def stable_since(self, site: str) -> datetime | None:
+        """The tick a data path from `site` was first seen up, or None while none is up.
+
+        A path up at boot counts as stable.
+        """
+        return self._stable.get(site)
+
+    def advance(self, now: datetime, faults: Iterable[Callable[[], None]] = ()) -> None:
+        """Move to `now` and let the faults land, then everything else that runs on its own.
+
+        After the faults: the link, Kubernetes, and each PoP's collectors, AAA, configuration push
+        and site log.
+        """
         self.now, last, self._last = now, self._last, now
+        for fault in faults:
+            fault()
         self._deliver()
         for site, kube in self.kubes.items():
             for pod in kube.reconcile():
-                self.note(f"kubernetes recreated {pod.service} on {pod.resource}")
+                self._line(
+                    "kubernetes_recreated", site=site, service=pod.service, resource=pod.resource
+                )
                 self.kubernetes.append(
                     {
                         "time": f"{now:%Y-%m-%dT%H:%M:%SZ}",
@@ -99,19 +168,23 @@ class World:  # pylint: disable=too-many-instance-attributes
                 )
         for site in self.inventory.sites:
             if site.role is Role.POP:
+                if self.regions_reachable(site.id)[1]:
+                    self._stable.setdefault(site.id, now)
+                else:
+                    self._stable.pop(site.id, None)
                 self._poll(site.id, last)
                 self._probe(site.id)
+                self._push(site.id)
+                self._ship(site.id)
 
     def _deliver(self) -> None:
         waiting: list[Message] = []
         for message in self._link:
-            sent, site, payload = message
+            sent, site, batch = message
             if sent >= self.now or not self.regions_reachable(site)[1]:
                 waiting.append(message)
-            elif isinstance(payload, Batch):
-                self.cloud.receive(payload, self.now)
             else:
-                self._inbox[site].append(payload)
+                self.cloud.receive(batch, self.now)
         self._link = waiting
 
     def _poll(self, site: str, last: datetime) -> None:
@@ -123,19 +196,46 @@ class World:  # pylint: disable=too-many-instance-attributes
             for counter in self.inventory.telemetry.counters:
                 interval = self.telemetry.poll(handoff, counter, boundary - self._every)
                 if interval:
-                    self._polled[site].append(interval)
+                    self.site_logs[site].intervals.append(interval)
+
+    def _push(self, site: str) -> None:
+        """Configuration push takes the site's stream once a data path is stable, where it runs."""
+        if not (self._settled(site) and self._running(site, "applies-desired")):
+            return
+        done = len(self.config_push.actions)
+        self.config_push.pull(site, cloud=self.cloud, log=self.site_logs[site], at=self.now)
+        for row in self.config_push.actions[done:]:
+            self._line(f"config_push_{row['outcome']}", site=site, **row)
+
+    def _ship(self, site: str) -> None:
+        """Ship `site`'s log while a data path has been stable."""
+        batch = self.site_logs[site].ship(stable=self._settled(site))
+        if batch:
+            self.send(site, batch)
+
+    def _settled(self, site: str) -> bool:
+        """Whether a data path has been up continuously for `rejoin_stable_seconds`."""
+        since = self._stable.get(site)
+        return since is not None and self.now - since >= self._settle
 
     def _probe(self, site: str) -> None:
-        """Note where the site's AAA answers from, when that changes."""
-        if self._running(site, "credential-cache"):
-            answer = self.aaa.answer(site, cloud=self.regions_reachable(site)[1])
-            if answer != self._aaa.get(site, self.aaa.answer(site, cloud=True)):
-                self.note(answer)
-            self._aaa[site] = answer
+        """When the site loses the cloud, note that its AAA still answers; nothing on return."""
+        cloud = self.regions_reachable(site)[1]
+        if self._cloud.get(site, True) and not cloud and self._running(site, "credential-cache"):
+            self._line(f"aaa_{self.aaa.answer()}", site=site)
+        self._cloud[site] = cloud
 
     def seal(self, resource: str) -> None:
         """Revoke `resource`'s identity and its disk key, and wipe its disks."""
         self.sealed.add(resource)
+
+    def _line(self, name: str, **facts: object) -> None:
+        """Note the inventory's screen line `name`, filled from `facts`."""
+        self.note(self.text(name, **facts))
+
+    def text(self, name: str, **facts: object) -> str:
+        """The inventory's screen line `name`, filled from `facts`."""
+        return Template(self.inventory.lines[name]).substitute(facts)
 
     def note(self, text: str) -> None:
         """Add a line for the screen."""

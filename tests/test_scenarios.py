@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from builders import INVENTORY, RECREATED, recreated_rows
-from sharectl.play import Event, Kind, load_scenario, play
+from builders import ALL_PATHS, INVENTORY, RECREATED, recreated_rows
+from sharectl.model import Layer, Outcome
+from sharectl.play import Event, Kind, Player, load_scenario, play
 from sharectl.stubs import Coverage
 
 SCENARIOS = Path(__file__).parent.parent / "scenarios"
@@ -101,7 +102,7 @@ def test_the_partner_vm_pods_are_recreated_on_share_servers_at_the_next_tick(
     play(load_scenario(SCENARIOS / "partner-reclaim.toml"), INVENTORY, tmp_path, show=shown.append)
 
     assert [line for line in shown if "kubernetes" in line] == [
-        f"10:00:11 kubernetes recreated {s} on {r}" for s, r in RECREATED
+        f"10:00:11 kubernetes at mombasa recreated {s} on {r}" for s, r in RECREATED
     ]
     rows = (tmp_path / "partner-reclaim" / "kubernetes.jsonl").read_text().splitlines()
     assert [json.loads(row) for row in rows] == recreated_rows("2026-10-10T10:00:11Z")
@@ -112,15 +113,22 @@ def test_the_fibre_cut_shows_and_writes_the_reconciliation(tmp_path: Path) -> No
     play(load_scenario(SCENARIOS / "fibre-cut.toml"), INVENTORY, tmp_path, show=shown.append)
     out = tmp_path / "fibre-cut"
 
-    assert "boot mombasa: mba-kilima-01 5, mba-srv-1 7, mba-srv-2 7, mba-srv-3 6" in shown
+    assert "boot mombasa: mba-kilima-01 4, mba-srv-1 6, mba-srv-2 6, mba-srv-3 6" in shown
     assert [line for line in shown if " aaa at " in line] == [
-        "03:12:21 aaa at mombasa answers from the local credential copy",
-        "09:12:21 aaa at mombasa answers from the cloud",
+        "03:12:11 aaa at mombasa still answers from the local credential copy",
+    ]
+    assert [line for line in shown if " config-push " in line] == [
+        "03:02:11 config-push at barcelona applied gen 8 to bcn-node-1/eth-1-12 (above applied 7)",
+        "03:02:11 config-push at marseille applied gen 8 to mrs-node-1/eth-1-12 (above applied 7)",
+        "03:02:11 config-push at mombasa applied gen 8 to mba-node-1/eth-1-12 (above applied 7)",
+        "05:00:11 config-push at barcelona applied gen 1 to bcn-node-1/eth-1-13 (above applied 0)",
+        "09:17:11 config-push at mombasa applied gen 1 to mba-node-1/eth-1-13 (above applied 0)",
+        "09:17:31 config-push at mombasa ignored gen 1 for mba-node-1/eth-1-13: 1 <= applied 1",
     ]
     assert shown[-3:-1] == [
-        "coverage mba-node-1/eth-1-12 ifHCInOctets: 73 held, 3 resent, 76 expected, 76 unique, "
-        "3 duplicates dropped, 0 missing",
-        "summary: generations_applied 5, replays_ignored 1, decisions_merged 10, pods_recreated 0, "
+        "cloud coverage mba-node-1/eth-1-12 ifHCInOctets: 73 held, 3 resent, 76 expected, "
+        "76 unique, 3 duplicates dropped, 0 missing",
+        "summary: generations_applied 5, replays_ignored 1, decisions_merged 4, pods_recreated 0, "
         "pods_pending 0, pods_left_on_released 0",
     ]
     assert json.loads((out / "coverage.json").read_text()) == [
@@ -138,8 +146,8 @@ def test_the_fibre_cut_shows_and_writes_the_reconciliation(tmp_path: Path) -> No
     merged = [json.loads(r)["data"] for r in (out / "decisions.jsonl").read_text().splitlines()]
     keys = [(d["at"], d["decision_id"], d["phase"]) for d in merged]
     assert keys == sorted(keys)
-    assert len(merged) == 20
-    assert sorted(Counter(d["decision_id"] for d in merged).values()) == [2] * 10
+    assert len(merged) == 8
+    assert sorted(Counter(d["decision_id"] for d in merged).values()) == [2] * 4
     events = [json.loads(r)["data"] for r in (out / "events.jsonl").read_text().splitlines()]
     assert [(e["handoff"], e["generation"], e["agreement"], e["version"]) for e in events] == [
         ("bcn-node-1/eth-1-12", 8, "atlas-0001", 1),
@@ -149,7 +157,51 @@ def test_the_fibre_cut_shows_and_writes_the_reconciliation(tmp_path: Path) -> No
         ("mba-node-1/eth-1-13", 1, "second-buyer-0001", 1),
     ]
     site = (out / "site-mba.jsonl").read_text().splitlines()
-    assert [json.loads(r)["sequence"] for r in site] == [str(n) for n in range(1, 15)]
+    assert [json.loads(r)["sequence"] for r in site] == [str(n) for n in range(1, 9)]
+
+
+def test_a_config_push_action_the_file_does_not_expect_fails_the_scenario(tmp_path: Path) -> None:
+    scenario = load_scenario(SCENARIOS / "fibre-cut.toml")
+
+    failures = play(
+        replace(scenario, expect_config_push=scenario.expect_config_push[:5]),
+        INVENTORY,
+        tmp_path,
+        show=lambda _: None,
+    )
+
+    assert failures == ["unexpected: 09:17:31 config-push mba-node-1/eth-1-13 gen 1 ignored"]
+
+
+def test_an_expected_config_push_action_that_never_comes_is_missing(tmp_path: Path) -> None:
+    scenario = load_scenario(SCENARIOS / "fibre-cut.toml")
+    extra = replace(scenario.expect_config_push[-1], generation=2)
+
+    failures = play(
+        replace(scenario, expect_config_push=(*scenario.expect_config_push, extra)),
+        INVENTORY,
+        tmp_path,
+        show=lambda _: None,
+    )
+
+    assert failures == ["missing: 09:17:31 config-push mba-node-1/eth-1-13 gen 2 ignored"]
+
+
+def test_a_config_push_action_that_differs_shows_what_came_instead(tmp_path: Path) -> None:
+    scenario = load_scenario(SCENARIOS / "fibre-cut.toml")
+    wrong = replace(scenario.expect_config_push[-1], outcome=Outcome.APPLIED)
+
+    failures = play(
+        replace(scenario, expect_config_push=(*scenario.expect_config_push[:5], wrong)),
+        INVENTORY,
+        tmp_path,
+        show=lambda _: None,
+    )
+
+    assert failures == [
+        "expected: 09:17:31 config-push mba-node-1/eth-1-13 gen 1 applied; "
+        "got: 09:17:31 config-push mba-node-1/eth-1-13 gen 1 ignored"
+    ]
 
 
 def test_a_scenario_name_that_is_not_a_safe_file_name_is_rejected(tmp_path: Path) -> None:
@@ -171,7 +223,12 @@ def test_each_phase_heads_the_lines_from_its_time(tmp_path: Path) -> None:
     play(load_scenario(SCENARIOS / "partner-reclaim.toml"), INVENTORY, tmp_path, show=shown.append)
 
     heading = shown.index("10:00:01 [phase] Kilima gives ten minutes' notice")
-    assert shown[heading + 1].startswith("10:00:01 site/mombasa drain-on-reclaim@v1")
+    assert [line.split(" poll ")[0] for line in shown[heading + 1 : heading + 4]] == [
+        "10:00:01 site/barcelona",
+        "10:00:01 site/marseille",
+        "10:00:01 site/mombasa",
+    ]
+    assert shown[heading + 4].startswith("10:00:01 site/mombasa drain-on-reclaim@v1")
 
 
 def test_a_second_play_writes_over_the_first(tmp_path: Path) -> None:
@@ -275,3 +332,49 @@ def test_coverage_the_scenario_never_checked_fails_every_field(tmp_path: Path) -
             ("missing", 0),
         )
     ]
+
+
+def test_a_paths_event_cuts_only_sessions_when_its_layer_says_so() -> None:
+    scenario = load_scenario(SCENARIOS / "partner-reclaim.toml")
+    regions = ("E1", "E2", "E3")
+    cut = Event(
+        at=scenario.start,
+        kind=Kind.PATHS_DOWN,
+        site="mombasa",
+        to=regions,
+        paths=ALL_PATHS,
+        layer=Layer.SESSION,
+    )
+    player = Player(replace(scenario, events=(cut,)), INVENTORY, lambda _: None)
+
+    player.step(scenario.start)
+
+    assert player.world.regions_reachable("mombasa") == (0, False)
+    assert player.world.data_links_up("mombasa") == 2
+
+
+def test_a_paths_event_with_a_layer_that_is_not_link_or_session_is_rejected(
+    tmp_path: Path,
+) -> None:
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        (SCENARIOS / "fibre-cut.toml")
+        .read_text()
+        .replace('kind = "paths-down"\n', 'kind = "paths-down"\nlayer = "fibre"\n')
+    )
+
+    with pytest.raises(ValidationError, match=r"layer\n  Input should be 'link' or 'session'"):
+        load_scenario(bad)
+
+
+def test_a_paths_event_with_no_layer_takes_the_links_down_whatever_its_sites() -> None:
+    scenario = load_scenario(SCENARIOS / "partner-reclaim.toml")
+    cut = Event(
+        at=scenario.start, kind=Kind.PATHS_DOWN, site="mombasa", to=("E1",), paths=ALL_PATHS
+    )
+    player = Player(replace(scenario, events=(cut,)), INVENTORY, lambda _: None)
+
+    player.step(scenario.start)
+
+    assert player.world.regions_reachable("mombasa") == (0, False)
+    assert player.world.data_links_up("mombasa") == 0

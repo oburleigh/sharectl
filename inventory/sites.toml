@@ -1,7 +1,7 @@
 # The estate: sites, the resources pods run on, network nodes and their handoffs.
 
 [network]
-paths = ["primary", "oob"]           # every pair of sites is joined by each of these paths
+paths = ["uplink-a", "uplink-b", "oob"]  # every pair of sites is joined by each of these paths
 management_only = ["oob"]            # reach a site for operators; carry no desired state or records
 
 [telemetry]
@@ -135,17 +135,21 @@ kind = "region-cluster"
 provider = "azure-frankfurt"
 trust = "trusted"
 
+# Each node's far-end peer on each path: the BFD neighbour at the other end of that path's link.
 [[node]]
 id = "bcn-node-1"
 site = "barcelona"
+peers = { uplink-a = "192.0.2.1", uplink-b = "198.51.100.1", oob = "203.0.113.1" }
 
 [[node]]
 id = "mrs-node-1"
 site = "marseille"
+peers = { uplink-a = "192.0.2.5", uplink-b = "198.51.100.5", oob = "203.0.113.5" }
 
 [[node]]
 id = "mba-node-1"
 site = "mombasa"
+peers = { uplink-a = "192.0.2.9", uplink-b = "198.51.100.9", oob = "203.0.113.9" }
 
 [[handoff]]
 id = "bcn-node-1/eth-1-12"

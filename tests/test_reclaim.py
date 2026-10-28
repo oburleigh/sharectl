@@ -11,18 +11,18 @@ def test_a_notice_drains_every_pod_a_service_can_spare_and_sets_fence_and_releas
     decisions, memory = decide(state(0, pods=BOOT, notices=NOTICE))
 
     assert lines(decisions) == [
-        f"drain-on-reclaim {KILIMA} applied: cordon {KILIMA} and evict 5 of its 5 pods, "
+        f"drain-on-reclaim {KILIMA} applied: cordon {KILIMA} and evict 4 of its 4 pods, "
         "each service at or above its min; fence at 03:05:01, release at 03:08:01"
     ]
-    assert decisions[0].evict == BOOT[:5]
+    assert decisions[0].evict == BOOT[:4]
     assert decisions[0].limited is False
     assert (memory.reclaims[KILIMA].fence, memory.reclaims[KILIMA].release) == (at(300), at(480))
 
 
 def test_a_drain_never_takes_a_service_below_its_min() -> None:
     pods = (
-        Pod(service="local-log", resource=KILIMA),
-        Pod(service="local-log", resource="mba-srv-1"),
+        Pod(service="sdn-controller", resource=KILIMA),
+        Pod(service="sdn-controller", resource="mba-srv-1"),
     )
 
     decisions, _ = decide(state(0, pods=pods, notices=NOTICE))
@@ -62,7 +62,7 @@ def test_a_leased_resource_silent_for_confirm_seconds_is_drained_fenced_after_gr
 
     assert not early
     assert lines(drained) == [
-        f"drain-on-reclaim {KILIMA} applied: cordon {KILIMA} and evict 5 of its 5 pods, each "
+        f"drain-on-reclaim {KILIMA} applied: cordon {KILIMA} and evict 4 of its 4 pods, each "
         "service at or above its min; fence at 03:10:31, release at 03:10:41"
     ]
     assert drained[0].limited is True

@@ -1,2 +1,2 @@
 #!/usr/bin/env sh
-cd "$(dirname "$0")/.." && exec uv run sharectl play "scenarios/partner-reclaim.toml" "$@"
+cd "$(dirname "$0")/.." && exec uv run sharectl play --site mombasa "scenarios/partner-reclaim.toml" "$@"
