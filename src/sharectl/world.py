@@ -1,4 +1,4 @@
-"""The simulated world: sites and the paths between them, the link, notices and the fakes."""
+"""The simulated world: sites and the paths between them, the link and the fakes."""
 
 from datetime import datetime, timedelta
 from string import Template
@@ -22,10 +22,7 @@ type Message = tuple[datetime, str, Batch]
 
 
 class World:  # pylint: disable=too-many-instance-attributes
-    """The fabric every controller observes and acts on.
-
-    A real deployment swaps in probes, provider APIs and the network behind the same calls.
-    """
+    """The fabric every controller observes and acts on."""
 
     def __init__(self, inventory: Inventory, start: datetime) -> None:
         """Boot the estate at `start`: every resource active, every pod placed."""
@@ -50,8 +47,6 @@ class World:  # pylint: disable=too-many-instance-attributes
             sites={h.id: node_site[h.node] for h in inventory.handoffs},
             configured=dict(self.sdn.configured),
         )
-        self.notices: dict[str, datetime] = {}
-        self.silent: dict[str, datetime] = {}
         self.released: set[str] = set()
         self.notes: list[tuple[datetime, str]] = []
         self.kubernetes: list[Record] = []

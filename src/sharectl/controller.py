@@ -4,12 +4,12 @@ import base64
 import json
 from datetime import datetime, timedelta
 from functools import partial
-lazy from collections.abc import Callable, Iterable, Sequence
+lazy from collections.abc import Callable, Sequence
 
 from sharectl.decide import decide
 from sharectl.endpoints import BFD_PEERS, BGP_NEIGHBORS, Endpoints, Message, agent
 from sharectl.log import DECISION, Record, envelope, stamp
-from sharectl.model import Decision, Memory, Node, Outcome, Pod, Resource, Site, State
+from sharectl.model import Decision, Memory, Node, Outcome, Pod, Site, State
 lazy from sharectl.world import World
 
 POLL: Message = {"path": [BFD_PEERS, BGP_NEIGHBORS], "encoding": "JSON_IETF"}
@@ -34,28 +34,31 @@ class Controller:  # pylint: disable=too-many-instance-attributes
         self._names: dict[tuple[str, str | None], str]
         self._stable: datetime | None = None  # pragma: no mutate, falsy until a poll sets it
         self._paths: dict[str, list[tuple[str, bool, tuple[str, ...]]]] = {}
+        self._notices: dict[str, datetime] = {}
+
+    def told(self, resource: str, reclaim_at: datetime) -> None:
+        """Take a lease owner's notice that it takes `resource` back at `reclaim_at`.
+
+        A notice for a resource at another site is not this controller's.
+        """
+        if resource in {r.id for r in self.world.inventory.resources if r.site == self.site.id}:
+            self._notices[resource] = reclaim_at
 
     def observe(self) -> State:
         """Take a frozen snapshot of the site, what arrived, and the memory."""
         world, site = self.world, self.site.id
         reachable, data_links_up = self._poll()
-        leases = self._leases(r for r in world.inventory.resources if r.site == site)
         return State(
             inventory=world.inventory,
             now=world.now,
             site=self.site,
             resources=tuple(r for r in world.inventory.resources if r.site == site),
-            pods=self._pods(),
+            pods=self._pods() if self._busy() else (),
             regions=len(world.inventory.regions),
             reachable=reachable,
             stable_since=self._stable,
             data_links_up=data_links_up,
-            notices={
-                r: datetime.fromisoformat(lease["reclaimAt"])
-                for r, lease in leases.items()
-                if lease["state"] == "reclaiming"
-            },
-            silent=self._silent(),
+            notices=dict(self._notices),
             memory=self.memory,
         )
 
@@ -90,6 +93,14 @@ class Controller:  # pylint: disable=too-many-instance-attributes
         self._stable = (self._stable or self.world.now) if data else None
         return len(reached), links_up
 
+    def _busy(self) -> bool:
+        """Say whether the cluster matters now: a reclaim is under way, or pods wait for room.
+
+        Kubernetes places pods on its own; the controller reads them only while it acts on them.
+        """
+        waiting = any(case == "pending" for case, _ in self.memory.waits)
+        return bool(self._notices or self.memory.reclaims or waiting)
+
     def _pods(self) -> tuple[Pod, ...]:
         """Every pod in the site's cluster, from the API server; their names are kept to act on."""
         _, pods = self.endpoints.kubernetes.request("GET", "/api/v1/pods")
@@ -98,25 +109,6 @@ class Controller:  # pylint: disable=too-many-instance-attributes
             for p in pods["items"]
         }
         return tuple(Pod(service=s, resource=r) for s, r in self._names)
-
-    def _silent(self) -> dict[str, datetime]:
-        """Each node whose Ready condition is Unknown, and since when."""
-        _, nodes = self.endpoints.kubernetes.request("GET", "/api/v1/nodes")
-        return {
-            n["metadata"]["name"]: datetime.fromisoformat(c["lastTransitionTime"])
-            for n in nodes["items"]
-            for c in n["status"]["conditions"]
-            if (c["type"], c["status"]) == ("Ready", "Unknown")
-        }
-
-    def _leases(self, resources: Iterable[Resource]) -> dict[str, Message]:
-        """The state of the lease on each leased resource, from its owner's API."""
-        leased = self.world.inventory.leases
-        return {
-            r.id: self.endpoints.leases.request("GET", f"/v1/leases/{r.id}")[1]
-            for r in resources
-            if r.id in leased
-        }
 
     def _report(self, state: State) -> None:
         """Show each node's poll: the first, any that differs, and one every few minutes."""
@@ -154,6 +146,7 @@ class Controller:  # pylint: disable=too-many-instance-attributes
                 self._fence(resource)
             case "release", resource if resource:
                 self._call(self.endpoints.leases.request, "POST", f"/v1/leases/{resource}/release")
+                self._notices.pop(resource, None)
             case _:  # pragma: no mutate, a match with no arm already does nothing
                 pass
 

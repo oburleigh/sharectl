@@ -5,25 +5,26 @@ import time
 import tomllib
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import partial
-from itertools import zip_longest
+from itertools import product, zip_longest
+from queue import SimpleQueue
+from threading import Condition
 from typing import Annotated
-lazy from collections.abc import Callable, Generator, Mapping, Sequence
+lazy from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 lazy from pathlib import Path
 
 from pydantic import Field, TypeAdapter
 
 from sharectl.controller import Controller
-from sharectl.log import CONFIRMED, Record, line, stamp
+from sharectl.log import CONFIRMED, Record, line
 from sharectl.model import Inventory, Layer, Outcome, Role
 from sharectl.world import World
 lazy from sharectl.stubs import Coverage
 
-PID, CLOCK, SCREEN, SHOWN, EVENTS = "controller.pid", "clock", "screen.txt", "shown", "events"
-"""The live controller's files in its signal directory: its pid, its clock, its screen, how much of
-the screen `wait` has shown, and the directory events wait in."""
+SCREEN = "screen.txt"
+"""Where each play writes its screen, beside its other files."""
 
 
 class Kind(StrEnum):
@@ -33,7 +34,6 @@ class Kind(StrEnum):
     PATHS_DOWN = "paths-down"
     PATHS_UP = "paths-up"
     RECLAIM_NOTICE = "reclaim-notice"
-    RESOURCE_SILENT = "resource-silent"
     RESEND_DESIRED = "resend-desired"
 
 
@@ -60,7 +60,6 @@ class Event:  # pylint: disable=too-many-instance-attributes
     layer: Layer = Layer.LINK
     resources: tuple[str, ...] = ()
     notice_minutes: int = 0
-    resource: str = ""
     handoff: str = ""
     generation: int = 0
 
@@ -130,12 +129,8 @@ class Run:
 AT_ONCE = Run()
 """Every PoP's controller, with no pause between ticks."""
 
-
-def replace_text(path: Path, text: str) -> None:
-    """Write `text` to `path` so that a reader in another process sees the old text or the new."""
-    part = path.with_name(f"{path.name}.part")
-    part.write_text(text)
-    part.replace(path)
+BEFORE = datetime.min.replace(tzinfo=UTC)
+"""A live clock's time before its first tick."""
 
 
 @contextmanager
@@ -155,38 +150,70 @@ def _screen(directory: Path, show: Callable[[str], None]) -> Generator[Callable[
 class Live:
     """The estate with its mocks, running from a start for ever, taking each event sent to them."""
 
-    def __init__(self, inventory: Inventory, signal: Path, *, run: Run) -> None:
-        """Listen on `signal`, running the controllers `run` names at its pace."""
+    def __init__(self, inventory: Inventory, *, run: Run) -> None:
+        """Run the controllers `run` names at its pace."""
         super().__init__()
-        self.inventory, self.signal, self.run = inventory, signal, run
+        self.inventory, self.run = inventory, run
+        self._sent: SimpleQueue[Mapping[str, object]] = SimpleQueue()
+        self._changed = Condition()
+        self._lines: list[str] = []
+        self._now = BEFORE
+        self._shown = 0  # pragma: no mutate, a slice from None is a slice from 0
+
+    def send(self, event: Mapping[str, object]) -> None:
+        """Hand one event, as `emit` gives it, to the mocks; it lands at the next tick."""
+        self._sent.put(event)
+
+    def wait(self, minutes: int) -> Iterator[str]:
+        """Each line not given to a wait yet, until the clock has moved `minutes` on from now.
+
+        It waits for the first tick, and gives no line twice to any wait.
+        """
+        with self._changed:
+            self._changed.wait_for(lambda: self._now > BEFORE)
+            until = self._now + timedelta(minutes=minutes)
+        while True:
+            with self._changed:
+                self._changed.wait_for(lambda: self._lines[self._shown :] or self._now >= until)
+                lines, self._shown = self._lines[self._shown :], len(self._lines)
+                done = self._now >= until
+            yield from lines
+            if done:
+                return
 
     def listen(
         self, start: datetime, show: Callable[[str], None], until: datetime | None = None
     ) -> None:
         """Run from `start` until `until`, or for ever.
 
-        Each tick takes every event waiting in `signal/events`, in name order, into the mocks,
-        then steps each controller. The clock goes to `signal/clock` and every line to
-        `signal/screen.txt`.
+        Each tick lands every event sent since the last, in the order sent, then steps each
+        controller: a lease owner's notice goes to the controllers, anything else to the world.
         """
         scenario = TypeAdapter(Scenario).validate_python(
             {"name": "live", "start": start, "end": start}
         )
-        with _screen(self.signal, show) as emit:
-            player = Player(scenario, self.inventory, emit, sites=self.run.sites)
-            player.run(self.run.pace, until, take=self._take, tock=self._tock)
+
+        def emit(text: str) -> None:
+            show(text)
+            with self._changed:
+                self._lines.append(text)
+                self._changed.notify_all()
+
+        player = Player(scenario, self.inventory, emit, sites=self.run.sites)
+        player.run(self.run.pace, until, take=self._take, tock=self._tock)
 
     def _tock(self, now: datetime) -> None:
-        """Publish the clock, for `wait`."""
-        replace_text(self.signal / CLOCK, stamp(now))
+        """Move the clock on, for `wait`."""
+        with self._changed:
+            self._now = now
+            self._changed.notify_all()
 
     def _take(self, now: datetime) -> list[Event]:
-        """Every event waiting, in name order, landing at `now`; each is taken once."""
+        """Every event sent since the last tick, in the order sent, landing at `now`."""
         adapter = TypeAdapter(Event)
         taken: list[Event] = []
-        for path in sorted((self.signal / EVENTS).glob("*.json")):
-            taken.append(adapter.validate_python({**json.loads(path.read_text()), "at": now}))
-            path.unlink()
+        while not self._sent.empty():
+            taken.append(adapter.validate_python({**self._sent.get(), "at": now}))
         return taken
 
 
@@ -302,10 +329,9 @@ class Player:
                 down = event.kind is Kind.PATHS_DOWN
                 world.cut(event.site, event.to, event.paths, down=down, layer=event.layer)
             case Kind.RECLAIM_NOTICE:
-                for resource in event.resources:
-                    world.notices[resource] = event.at + timedelta(minutes=event.notice_minutes)
-            case Kind.RESOURCE_SILENT:
-                world.silent[event.resource] = event.at
+                reclaim_at = event.at + timedelta(minutes=event.notice_minutes)
+                for resource, controller in product(event.resources, self.controllers):
+                    controller.told(resource, reclaim_at)
             case Kind.RESEND_DESIRED:
                 world.cloud.resend(event.handoff, event.generation, world.now)
 

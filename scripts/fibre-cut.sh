@@ -1,15 +1,9 @@
 #!/usr/bin/env sh
-# The fibre between Mombasa and the cloud is cut for six hours. Nothing tells the controller: its
-# polls of the node find every path down. Agreements still go final, and one is resent on rejoin.
-# Flags (for example --tick-ms 5) reach every command.
 set -f # the cut's fields hold a literal *
 cd "$(dirname "$0")/.." || exit 1
 sharectl() { uv run sharectl "$@"; }
-started=$(sharectl start --site mombasa "$@") || exit 1
-echo "$started"
-case "$started" in "controller started"*) trap 'sharectl stop "$@"' EXIT ;; esac
 cut="site=mombasa to=* paths=uplink-a,uplink-b,oob"
-sharectl wait 2 "$@"
+sharectl wait 2 "$@" || { echo "no controller is running: start it first with make run" >&2; exit 1; }
 sharectl emit agreement-final agreement=atlas-0001 version=1 \
   handoffs=bcn-node-1/eth-1-12,mrs-node-1/eth-1-12,mba-node-1/eth-1-12 "$@" > /dev/null
 sharectl wait 10 "$@"

@@ -155,11 +155,9 @@ class Params:  # pylint: disable=too-many-instance-attributes
     tick_seconds: int
     confirm_seconds: int
     rejoin_stable_seconds: int
-    unreachable_grace_seconds: int
     resend_overlap: int
     fence_before_deadline_minutes: int
     release_before_deadline_minutes: int
-    max_actions_per_hour: int
     poll_report_minutes: int
 
 
@@ -239,7 +237,6 @@ class Reclaim:
 
     fence: datetime
     release: datetime
-    notice: bool
     fenced: bool = False
 
 
@@ -251,7 +248,6 @@ class Memory:  # pylint: disable=too-many-instance-attributes
     down_since: datetime | None = None
     waits: frozenset[tuple[str, str]] = frozenset()
     reclaims: Mapping[str, Reclaim] = frozendict()
-    actions: tuple[datetime, ...] = ()
     paged: frozenset[tuple[str, str]] = frozenset()
 
 
@@ -269,7 +265,6 @@ class State:  # pylint: disable=too-many-instance-attributes
     stable_since: datetime | None
     data_links_up: int
     notices: Mapping[str, datetime] = frozendict()
-    silent: Mapping[str, datetime] = frozendict()
     memory: Memory = Memory()
 
 
@@ -283,6 +278,5 @@ class Decision:  # pylint: disable=too-many-instance-attributes
     observed: Mapping[str, object]
     outcome: Outcome = Outcome.APPLIED
     resource: str | None = None
-    limited: bool = False
     page: bool = False
     evict: tuple[Pod, ...] = ()

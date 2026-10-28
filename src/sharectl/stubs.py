@@ -26,11 +26,7 @@ class Batch:
 
 
 class Sdn(Protocol):
-    """The SDN controller, each node's only configuration writer.
-
-    Real: it applies a handoff under the NETCONF lock on the node's candidate datastore
-    (RFC 6241 §7.5) and commits by confirmed commit (§8.4).
-    """
+    """The SDN controller, each node's only configuration writer."""
 
     def apply(self, handoff: str, state: DesiredState, *, at: datetime) -> None:
         """Apply `state` to `handoff`; returning confirms it, and the same state twice is one."""
@@ -38,10 +34,7 @@ class Sdn(Protocol):
 
 
 class ConfigPush(Protocol):
-    """Hands each change on the site's stream to the SDN controller, once, by generation.
-
-    Real: configuration push streaming from a desired-state reader in any cell.
-    """
+    """Hands each change on the site's stream to the SDN controller, once, by generation."""
 
     def pull(self, site: str, *, cloud: Cloud, log: SiteLog, at: datetime) -> None:
         """Take the changes on `site`'s stream after the last recorded; confirm each to `log`."""
@@ -49,10 +42,7 @@ class ConfigPush(Protocol):
 
 
 class SiteLog(Protocol):
-    """Holds a site's records and intervals and ships them to the cloud.
-
-    Real: tables in the site's Postgres and their shipper.
-    """
+    """Holds a site's records and intervals and ships them to the cloud."""
 
     def write(self, record: Record) -> None:
         """Append `record` to the log."""
@@ -60,7 +50,7 @@ class SiteLog(Protocol):
 
 
 class Telemetry(Protocol):
-    """Reads a counter over one interval. Real: SNMP or gNMI polling by the collectors."""
+    """Reads a counter over one interval."""
 
     def poll(self, handoff: str, counter: str, start: datetime) -> Interval | None:
         """The counter over the interval from `start`, or None if not measured then."""
@@ -68,7 +58,7 @@ class Telemetry(Protocol):
 
 
 class Aaa(Protocol):
-    """Answers the credential-cache probe. Real: FreeRADIUS at the PoP."""
+    """Answers the credential-cache probe."""
 
     def answer(self) -> str:
         """Say where the site's AAA answers from: always its `local` credential copy."""
@@ -76,11 +66,7 @@ class Aaa(Protocol):
 
 
 class Cloud(Protocol):
-    """Desired state down, records up.
-
-    Real: the cells' circuit workflow and desired-state stream, ingestion into the record,
-    and the reconciler.
-    """
+    """Desired state down, records up."""
 
     def write(self, agreement: str, version: int, handoffs: list[str], *, at: datetime) -> None:
         """Write the next generation for each handoff of a final agreement to its site's stream."""

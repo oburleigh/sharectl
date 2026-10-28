@@ -4,13 +4,11 @@
 
 [params]
 tick_seconds = 10
-confirm_seconds = 30                 # before isolation, or acting on a silent leased resource
+confirm_seconds = 30                 # no region reachable this long before isolation
 rejoin_stable_seconds = 300          # a data path up this long before rejoin
-unreachable_grace_seconds = 600      # a silent leased resource is fenced this long after its drain
 resend_overlap = 3                   # intervals the cloud already had, resent on rejoin
 fence_before_deadline_minutes = 5
 release_before_deadline_minutes = 2
-max_actions_per_hour = 10            # unforced actions per site
 poll_report_minutes = 5              # a poll that changes nothing is shown this often
 
 [[rule]]
@@ -35,7 +33,7 @@ reasons = { applied = "data path stable for $seconds s" }
 id = "drain-on-reclaim"
 version = 1
 trigger = "resource.reclaimed"
-condition = "a reclaim notice for a leased resource, or one silent for confirm_seconds"
+condition = "a reclaim notice for a leased resource"
 action = "cordon-and-drain"
 rollback = "uncordon"
 reasons = { applied = "cordon $resource and evict $evicted of its $pods pods, each service at or above its min; fence at $fence, release at $release" }
@@ -78,7 +76,6 @@ reasons = { isolated = "the site rejoined the cloud", pending = "$service has no
 
 [refusals]
 site = "$resource is not on $site: a controller acts only on its own site"
-cap = "$actions unforced actions in the last hour, the cap is $cap: frozen, a human decides"
 
 # The screen lines of the stubs around the controller: none of them is a decision.
 [lines]

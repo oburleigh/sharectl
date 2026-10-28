@@ -1,9 +1,4 @@
-# Shortcuts for the commands in the README. Pass flags with ARGS, for example
-# make fibre-cut ARGS="--tick-ms 5". Settings in .env, when it exists, reach every command.
-# The scenario targets always run Mombasa's controller, as their scripts do.
-
 -include .env
-# run, demo and test use Mombasa's controller unless .env or the shell names another PoP.
 SHARECTL_SITE ?= mombasa
 export
 

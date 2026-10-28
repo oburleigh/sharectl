@@ -1,9 +1,4 @@
-"""The Kubernetes fake: one cluster per site, placing pods by the inventory's placement rules.
-
-In a real deployment these rules are the manifests Argo CD applies: a required node affinity
-on trust, a toleration for the reclaimable taint, a topology spread on the provider, a pod
-anti-affinity for one copy per node, and a PodDisruptionBudget for each service's `min`.
-"""
+"""The Kubernetes fake: one cluster per site, placing pods by the inventory's placement rules."""
 
 from dataclasses import replace
 

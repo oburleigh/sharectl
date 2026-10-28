@@ -15,7 +15,6 @@ def test_a_notice_drains_every_pod_a_service_can_spare_and_sets_fence_and_releas
         "each service at or above its min; fence at 03:05:01, release at 03:08:01"
     ]
     assert decisions[0].evict == BOOT[:4]
-    assert decisions[0].limited is False
     assert (memory.reclaims[KILIMA].fence, memory.reclaims[KILIMA].release) == (at(300), at(480))
 
 
@@ -51,33 +50,6 @@ def test_fences_at_the_fence_time_deleting_what_is_left_then_releases() -> None:
         f"release {KILIMA} applied: release {KILIMA}: its owner reclaimed it"
     ]
     assert memory.reclaims == {}
-
-
-def test_a_leased_resource_silent_for_confirm_seconds_is_drained_fenced_after_grace() -> None:
-    silent = {KILIMA: at(0)}
-    early, memory = decide(state(20, pods=BOOT, silent=silent))
-    drained, memory = decide(state(30, memory, pods=BOOT, silent=silent))
-    fenced, memory = decide(state(630, memory, silent=silent))
-    released, _ = decide(state(640, memory, silent=silent))
-
-    assert not early
-    assert lines(drained) == [
-        f"drain-on-reclaim {KILIMA} applied: cordon {KILIMA} and evict 4 of its 4 pods, each "
-        "service at or above its min; fence at 03:10:31, release at 03:10:41"
-    ]
-    assert drained[0].limited is True
-    assert lines(fenced + released) == [
-        f"fence {KILIMA} applied: {KILIMA} holds 0 pods of Share's, deleted; identity revoked; "
-        "node deleted; disk key revoked; disks wiped",
-        f"release {KILIMA} applied: release {KILIMA}: its owner reclaimed it",
-    ]
-    assert [d.limited for d in fenced + released] == [True, True]
-
-
-def test_a_silent_resource_that_is_not_leased_is_left_to_kubernetes() -> None:
-    decisions, _ = decide(state(30, pods=BOOT, silent={"mba-srv-1": at(0)}))
-
-    assert not decisions
 
 
 TWO = replace(

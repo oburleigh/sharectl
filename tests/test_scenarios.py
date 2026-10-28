@@ -263,23 +263,6 @@ def test_each_phase_heading_is_shown_once(tmp_path: Path) -> None:
     ]
 
 
-def test_a_silent_resource_event_is_shown_with_the_failure_it_causes(tmp_path: Path) -> None:
-    scenario = load_scenario(SCENARIOS / "partner-reclaim.toml")
-    silent = Event(at=scenario.start, kind=Kind.RESOURCE_SILENT, resource="mba-kilima-01")
-    shown: list[str] = []
-
-    failures = play(
-        replace(scenario, events=(silent,), expect=(), expect_summary={}),
-        INVENTORY,
-        tmp_path,
-        show=shown.append,
-    )
-
-    unexpected = "unexpected: 10:00:31 site/mombasa drain-on-reclaim@v1 cordon-and-drain applied"
-    assert failures == [unexpected]
-    assert shown[-2:] == [unexpected, "partner-reclaim: FAIL"]
-
-
 def test_an_expected_decision_that_never_comes_is_missing(tmp_path: Path) -> None:
     scenario = load_scenario(SCENARIOS / "partner-reclaim.toml")
 

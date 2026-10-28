@@ -46,23 +46,18 @@ def _guard(state: State, memory: Memory, step: Step) -> tuple[Decision | None, M
     """
     decision, effect = step
     key = (decision.rule.id, decision.subject)
-    hour = tuple(t for t in memory.actions if state.now - t < timedelta(hours=1))
-    refusal = _limit(state, decision, len(hour))
+    refusal = _limit(state, decision)
     if refusal is None:
-        actions = (*hour, state.now) if decision.limited else memory.actions
-        return decision, replace(effect(memory), actions=actions)
+        return decision, effect(memory)
     reason = Template(state.inventory.refusals[refusal[0]]).substitute(refusal[1])
     refused = replace(decision, outcome=Outcome.REFUSED, reason=reason, page=True)
     return (None if key in memory.paged else refused), replace(memory, paged=memory.paged | {key})
 
 
-def _limit(state: State, decision: Decision, actions: int) -> tuple[str, dict[str, object]] | None:
+def _limit(state: State, decision: Decision) -> tuple[str, dict[str, object]] | None:
     """The limit a decision breaks, with its facts, or None."""
-    cap = state.inventory.params.max_actions_per_hour
     if not authorise(state, decision.resource):
         return "site", {"resource": decision.resource, "site": state.site.id}
-    if decision.limited and actions >= cap:
-        return "cap", {"actions": actions, "cap": cap}
     return None
 
 
@@ -111,18 +106,14 @@ def rejoin(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
 
 
 def drain(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
-    """Cordon a leased resource its owner reclaims, or one silent for `confirm_seconds`.
+    """Cordon a leased resource its owner reclaims.
 
     Evict each pod whose service keeps at least its `min` copies running elsewhere; Kubernetes
-    recreates them. Fence and release count back from the notice's deadline, or, with no
-    notice, follow `unreachable_grace_seconds` after the drain.
+    recreates them. Fence and release count back from the notice's deadline.
     """
     for resource in state.resources:
         deadline = state.notices.get(resource.id)
-        silent = (
-            _seconds(state, state.silent.get(resource.id)) >= state.inventory.params.confirm_seconds
-        )
-        if resource.lease is None or resource.id in memory.reclaims or not (deadline or silent):
+        if resource.lease is None or resource.id in memory.reclaims or deadline is None:
             continue
         reclaim = _schedule(state, deadline)
         on = [pod for pod in state.pods if pod.resource == resource.id]
@@ -138,20 +129,15 @@ def drain(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
             release=f"{reclaim.release:%H:%M:%S}",
         )
         effect = partial(_reclaim, resource=resource.id, reclaim=reclaim)
-        yield replace(decision, resource=resource.id, evict=evict, limited=not deadline), effect
+        yield replace(decision, resource=resource.id, evict=evict), effect
 
 
-def _schedule(state: State, deadline: datetime | None) -> Reclaim:
-    """Fence and release count back from the owner's deadline, or follow the grace period."""
+def _schedule(state: State, deadline: datetime) -> Reclaim:
+    """Fence and release count back from the owner's deadline."""
     params = state.inventory.params
-    if deadline is None:
-        fence_at = state.now + timedelta(seconds=params.unreachable_grace_seconds)
-        release_at = fence_at + timedelta(seconds=params.tick_seconds)
-        return Reclaim(fence=fence_at, release=release_at, notice=False)  # pragma: no mutate, falsy
     return Reclaim(
         fence=deadline - timedelta(minutes=params.fence_before_deadline_minutes),
         release=deadline - timedelta(minutes=params.release_before_deadline_minutes),
-        notice=True,
     )
 
 
@@ -174,7 +160,7 @@ def fence(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
             left = sum(pod.resource == resource for pod in state.pods)
             decision = _decision(rule, "applied", resource, resource=resource, pods=left)
             effect = partial(_reclaim, resource=resource, reclaim=replace(reclaim, fenced=True))
-            yield replace(decision, resource=resource, limited=not reclaim.notice), effect
+            yield replace(decision, resource=resource), effect
 
 
 def release(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
@@ -183,7 +169,7 @@ def release(state: State, memory: Memory, rule: Rule) -> Iterator[Step]:
         if reclaim.fenced and state.now >= reclaim.release:
             decision = _decision(rule, "applied", resource, resource=resource)
             effect = partial(_reclaim, resource=resource, reclaim=None)
-            yield replace(decision, resource=resource, limited=not reclaim.notice), effect
+            yield replace(decision, resource=resource), effect
 
 
 def _blocked(state: State, memory: Memory) -> dict[tuple[str, str], dict[str, object]]:

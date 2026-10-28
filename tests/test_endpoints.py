@@ -117,7 +117,6 @@ PRESSURES = (
     ("DiskPressure", "KubeletHasNoDiskPressure", "kubelet has no disk pressure"),
     ("PIDPressure", "KubeletHasSufficientPID", "kubelet has sufficient PID available"),
 )
-"""Kubelet's usual healthy pressure conditions: from memory of its output, not verified."""
 FAILURE: Message = {"kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure"}
 NOT_FOUND: Message = {**FAILURE, "reason": "NotFound", "code": 404}
 
@@ -154,65 +153,6 @@ def test_the_pod_list_names_each_pod_by_its_service_with_its_node_and_phase() ->
     ]
 
 
-def test_a_silent_node_reports_ready_unknown_since_it_went_silent() -> None:
-    world = World(INVENTORY, T0)
-    world.silent[KILIMA] = T0
-    world.advance(T0 + timedelta(seconds=60))
-
-    status, nodes = Kubernetes(world, "mombasa").request("GET", "/api/v1/nodes")
-
-    assert (status, nodes["kind"], nodes["apiVersion"]) == (200, "NodeList", "v1")
-    assert next(n for n in nodes["items"] if n["metadata"]["name"] == "mba-srv-1") == {
-        "kind": "Node",
-        "apiVersion": "v1",
-        "metadata": {"name": "mba-srv-1"},
-        "spec": {},
-        "status": {
-            "conditions": [
-                {
-                    "type": "Ready",
-                    "status": "True",
-                    "reason": "KubeletReady",
-                    "message": "kubelet is posting ready status",
-                    "lastHeartbeatTime": "2026-10-03T03:01:01Z",
-                    "lastTransitionTime": "2026-10-03T03:00:01Z",
-                },
-                *(
-                    {
-                        "type": kind,
-                        "status": "False",
-                        "reason": reason,
-                        "message": message,
-                        "lastHeartbeatTime": "2026-10-03T03:01:01Z",
-                        "lastTransitionTime": "2026-10-03T03:00:01Z",
-                    }
-                    for kind, reason, message in PRESSURES
-                ),
-            ]
-        },
-    }
-    ready = {n["metadata"]["name"]: n["status"]["conditions"][0] for n in nodes["items"]}
-    assert ready[KILIMA] == {
-        "type": "Ready",
-        "status": "Unknown",
-        "reason": "NodeStatusUnknown",
-        "message": "Kubelet stopped posting node status.",
-        "lastHeartbeatTime": "2026-10-03T03:00:01Z",
-        "lastTransitionTime": "2026-10-03T03:00:01Z",
-    }
-    assert (ready["mba-srv-1"]["status"], ready["mba-srv-1"]["lastHeartbeatTime"]) == (
-        "True",
-        "2026-10-03T03:01:01Z",
-    )
-    kilima = next(n for n in nodes["items"] if n["metadata"]["name"] == KILIMA)
-    assert [(c["type"], c["status"], c["reason"]) for c in kilima["status"]["conditions"]] == [
-        ("Ready", "Unknown", "NodeStatusUnknown"),
-        ("MemoryPressure", "Unknown", "NodeStatusUnknown"),
-        ("DiskPressure", "Unknown", "NodeStatusUnknown"),
-        ("PIDPressure", "Unknown", "NodeStatusUnknown"),
-    ]
-
-
 def test_a_cordon_patch_and_an_eviction_drain_a_node_as_the_api_server_would() -> None:
     world = World(INVENTORY, T0)
     api = Kubernetes(world, "mombasa")
@@ -237,6 +177,41 @@ def test_a_cordon_patch_and_an_eviction_drain_a_node_as_the_api_server_would() -
     ]
 
 
+def test_a_cordon_patch_answers_with_the_whole_node_ready_since_the_cluster_started() -> None:
+    world = World(INVENTORY, T0)
+    world.advance(T0 + timedelta(seconds=10))
+    ready = {
+        "status": "True",
+        "reason": "KubeletReady",
+        "message": "kubelet is posting ready status",
+        "lastHeartbeatTime": "2026-10-03T03:00:11Z",
+        "lastTransitionTime": "2026-10-03T03:00:01Z",
+    }
+
+    patched = Kubernetes(world, "mombasa").request(
+        "PATCH", f"/api/v1/nodes/{KILIMA}", {"spec": {"unschedulable": True}}
+    )
+
+    assert patched == (
+        200,
+        {
+            "kind": "Node",
+            "apiVersion": "v1",
+            "metadata": {"name": KILIMA},
+            "spec": {"unschedulable": True},
+            "status": {
+                "conditions": [
+                    {"type": "Ready", **ready},
+                    *(
+                        {**ready, "type": kind, "status": "False", "reason": why, "message": text}
+                        for kind, why, text in PRESSURES
+                    ),
+                ]
+            },
+        },
+    )
+
+
 def test_deleting_a_pod_at_once_then_its_node_leaves_nothing_on_it() -> None:
     world = World(INVENTORY, T0)
     api = Kubernetes(world, "mombasa")
@@ -253,29 +228,21 @@ def test_deleting_a_pod_at_once_then_its_node_leaves_nothing_on_it() -> None:
     assert all(p.resource != KILIMA for p in world.kubes["mombasa"].pods)
 
 
-def test_a_call_the_api_server_has_no_route_for_is_not_found() -> None:
+@pytest.mark.parametrize(
+    ("method", "path"), [("DELETE", "/api/v1/nodes/no-such-node"), ("GET", "/api/v1/nodes")]
+)
+def test_a_call_the_api_server_has_no_route_for_is_not_found(method: str, path: str) -> None:
     world = World(INVENTORY, T0)
 
-    status, body = Kubernetes(world, "mombasa").request("DELETE", "/api/v1/nodes/no-such-node")
+    status, body = Kubernetes(world, "mombasa").request(method, path)
 
     assert (status, body) == (404, NOT_FOUND)
 
 
-def test_the_lease_api_reports_a_reclaim_then_releases_the_lease() -> None:
+def test_the_lease_api_releases_a_lease() -> None:
     world = World(INVENTORY, T0)
-    leases = Leases(world)
-    active = leases.request("GET", f"/v1/leases/{KILIMA}")
-    world.notices[KILIMA] = T0 + timedelta(minutes=10)
-    reclaiming = leases.request("GET", f"/v1/leases/{KILIMA}")
-    released = leases.request("POST", f"/v1/leases/{KILIMA}/release")
 
-    assert active == (200, {"id": KILIMA, "state": "active", "reclaimAt": None})
-    assert reclaiming == (
-        200,
-        {"id": KILIMA, "state": "reclaiming", "reclaimAt": "2026-10-03T03:10:01Z"},
-    )
-    assert released == (204, {})
-    assert leases.request("GET", f"/v1/leases/{KILIMA}")[1]["state"] == "released"
+    assert Leases(world).request("POST", f"/v1/leases/{KILIMA}/release") == (204, {})
     assert world.released == {KILIMA}
 
 
@@ -357,11 +324,19 @@ def test_a_patch_that_does_not_set_unschedulable_leaves_the_node_schedulable() -
     assert world.kubes["mombasa"].cordoned == set()
 
 
-@pytest.mark.parametrize("path", ["/v1/leases/mba-srv-1", "/v1/elsewhere/mba-kilima-01"])
-def test_the_lease_api_knows_only_share_s_leases(path: str) -> None:
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/v1/leases/mba-srv-1/release"),
+        ("POST", "/v1/elsewhere/mba-kilima-01/release"),
+        ("POST", f"/v1/leases/{KILIMA}"),
+        ("GET", f"/v1/leases/{KILIMA}"),
+    ],
+)
+def test_the_lease_api_knows_only_the_release_of_share_s_leases(method: str, path: str) -> None:
     world = World(INVENTORY, T0)
 
-    assert Leases(world).request("POST", path) == (404, {"message": "no such lease"})
+    assert Leases(world).request(method, path) == (404, {"message": "no such lease"})
     assert world.released == set()
 
 
@@ -388,14 +363,13 @@ def test_get_answers_nothing_under_another_network_instance() -> None:
     assert response["notification"][0]["update"] == []
 
 
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [("GET", f"/v1/leases/{KILIMA}/release"), ("POST", f"/v1/leases/{KILIMA}")],
-)
-def test_the_lease_api_answers_405_to_a_method_a_path_does_not_take(method: str, path: str) -> None:
+def test_the_lease_api_answers_405_to_a_release_that_is_not_a_post() -> None:
     world = World(INVENTORY, T0)
 
-    assert Leases(world).request(method, path) == (405, {"message": "method not allowed"})
+    assert Leases(world).request("GET", f"/v1/leases/{KILIMA}/release") == (
+        405,
+        {"message": "method not allowed"},
+    )
     assert world.released == set()
 
 

@@ -1,28 +1,23 @@
 import os
-import signal
 import sys
+import time
 from pathlib import Path
-lazy from collections.abc import Iterator
-lazy from types import FrameType
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 
-def _timed_out(number: int, frame: FrameType | None) -> None:
-    del number, frame
-    raise TimeoutError
+@pytest.fixture
+def bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a run that does not stop within 20 ticks, rather than hang on it."""
+    ticks: list[float] = []
 
+    def tick(seconds: float) -> None:
+        ticks.append(seconds)
+        assert len(ticks) < 20, "the estate ran on past its last tick"
 
-@pytest.fixture(autouse=True)
-def watchdog(request: pytest.FixtureRequest) -> Iterator[None]:
-    """Fail a test that hangs, rather than hang the run; a script runs a whole scenario live."""
-    previous = signal.signal(signal.SIGALRM, _timed_out)
-    signal.alarm(120 if "script" in request.keywords else 20)
-    yield
-    signal.alarm(0)
-    signal.signal(signal.SIGALRM, previous)
+    monkeypatch.setattr(time, "sleep", tick)
 
 
 @pytest.fixture(autouse=True)

@@ -5,35 +5,35 @@ import contextlib
 import dataclasses
 import json
 import os
-import shutil
 import signal
-import subprocess
 import sys
-import time
-from datetime import UTC, datetime, timedelta
+import threading
+from datetime import UTC, datetime
+from functools import partial
 from importlib.metadata import version
+from multiprocessing.connection import Client, Connection, Listener
 from pathlib import Path
-lazy from collections.abc import Sequence
+lazy from collections.abc import Iterator, Sequence
 
 from pydantic import TypeAdapter, ValidationError
 
 from sharectl.inventory import load
 from sharectl.model import Role
 from sharectl.play import (
-    CLOCK,
-    EVENTS,
-    PID,
-    SCREEN,
-    SHOWN,
     Event,
     Kind,
     Live,
     Run,
     load_scenario,
     play,
-    replace_text,
 )
 lazy from sharectl.model import Inventory
+
+_show = partial(print, flush=True)
+"""Print a screen line at once, so a reader of a pipe sees it as it happens."""
+
+SOCKET = "controller.sock"
+"""The live controller's socket in its signal directory, where `emit` and `wait` reach it."""
 
 SETTINGS = {"inventory": "inventory", "scenarios": "scenarios", "out": "out", "signal": "signal"}
 """Each directory setting's default, relative to where the command runs.
@@ -50,8 +50,6 @@ HELP = {
     "run": "run the controller, live",
     "play": "play one file at a live pace",
     "emit": "hand one event to the running controller's mocks, as field=value pairs",
-    "start": "start the controller in the background, unless one is running",
-    "stop": "stop the running controller",
     "wait": "show the running controller's lines until its clock has moved on",
 }
 """The help text of the command and each of its parts."""
@@ -71,11 +69,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
-    if args.tick_ms is None:  # demo and scenario play at once unless paced; the rest run live
-        live = "20" if args.command in {"run", "play", "start"} else "0"
+    if args.tick_ms is None:
+        live = "20" if args.command in {"run", "play"} else "0"
         args.tick_ms = int(os.getenv("SHARECTL_TICK_MS", live))
     command = {"demo": _demo, "scenario": _demo, "run": _serve, "play": _demo, "emit": _emit}
-    command |= {"start": _start, "stop": _stop, "wait": _wait}
+    command |= {"wait": _wait}
     try:
         return command[args.command](args)
     except (ValidationError, CommandError) as error:
@@ -106,7 +104,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command")
     added = {
         name: commands.add_parser(name, parents=[settings], help=HELP[name])
-        for name in ("demo", "scenario", "run", "play", "emit", "start", "stop", "wait")
+        for name in ("demo", "scenario", "run", "play", "emit", "wait")
     }
     added["wait"].add_argument("minutes", type=int, help="simulated minutes")
     one, hand, emit = added["scenario"], added["play"], added["emit"]
@@ -140,17 +138,9 @@ class CommandError(ValueError):
 class RunningError(CommandError):
     """`run` found a controller already running on its signal directory."""
 
-    def __init__(self, pid: str) -> None:
-        """Name the running controller."""
-        super().__init__(f"run: a controller is already running (pid {pid})")
-
-
-class StartError(CommandError):
-    """The controller `start` launched exited before it was running."""
-
     def __init__(self) -> None:
-        """Say what happened."""
-        super().__init__("start: the controller exited as it started")
+        """Say what is running."""
+        super().__init__("run: a controller is already running")
 
 
 class NotRunningError(CommandError):
@@ -196,41 +186,72 @@ def _sites(args: argparse.Namespace, inventory: Inventory) -> frozenset[str]:
     return named
 
 
-def _show(line: str) -> None:
-    sys.stdout.write(f"{line}\n")
-    sys.stdout.flush()
-
-
 def _serve(args: argparse.Namespace) -> int:
     """Run the controller live from now, taking each event sent to its mocks, until stopped."""
     inventory = load(args.inventory)
     run = Run(pace=args.tick_ms / 1000, sites=_sites(args, inventory))
     args.signal.mkdir(parents=True, exist_ok=True)
-    pid = args.signal / PID
-    if _alive(pid):
-        raise RunningError(pid.read_text())
-    (args.signal / SHOWN).unlink(missing_ok=True)
-    shutil.rmtree(args.signal / EVENTS, ignore_errors=True)
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
-    replace_text(pid, str(os.getpid()))
-    _show(f"controller watching {args.signal}")
-    now = datetime.now(UTC)
-    start = now.replace(microsecond=0)  # pragma: no mutate, stamps are whole seconds
+    socket = args.signal / SOCKET
     try:
+        Client(str(socket)).close()
+    except FileNotFoundError, ConnectionRefusedError:  # refused: a killed controller's socket
+        socket.unlink(missing_ok=True)
+    else:
+        raise RunningError
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    live = Live(inventory, run=run)
+    with Listener(str(socket)) as listener:
+        threading.Thread(target=answer, args=(listener, live), daemon=True).start()
+        _show(f"controller watching {args.signal}")
+        now = datetime.now(UTC)
+        start = now.replace(microsecond=0)  # pragma: no mutate, stamps are whole seconds
         with contextlib.suppress(KeyboardInterrupt):
-            Live(inventory, args.signal, run=run).listen(start, _show)
-    finally:
-        pid.unlink(missing_ok=True)
+            live.listen(start, _show)
     return 0
 
 
+def answer(listener: Listener, live: Live) -> None:
+    """Answer each `emit` and `wait` sent to the controller, each in its own thread, for ever.
+
+    Run on a daemon thread: each reply thread inherits that, so a wait still open never holds the
+    controller open.
+    """
+    while True:
+        threading.Thread(target=reply, args=(listener.accept(), live)).start()
+
+
+def reply(connection: Connection, live: Live) -> None:
+    """Hand an event to the mocks, or send each line a wait shows; `null` ends the reply."""
+    with connection, contextlib.suppress(EOFError, OSError):  # the asker has gone
+        request = json.loads(connection.recv_bytes())
+        if "emit" in request:
+            live.send(request["emit"])
+        else:
+            for line in live.wait(request["wait"]):
+                connection.send_bytes(json.dumps(line).encode())
+        connection.send_bytes(b"null")
+
+
+def _ask(args: argparse.Namespace, request: dict[str, object]) -> Iterator[str]:
+    """Send `request` to the running controller and give each line of its reply."""
+    try:
+        connection = Client(str(args.signal / SOCKET))
+    except (FileNotFoundError, ConnectionRefusedError) as error:
+        raise NotRunningError(args.command) from error
+    with connection:
+        connection.send_bytes(json.dumps(request).encode())
+        try:
+            while (line := json.loads(connection.recv_bytes())) is not None:
+                yield line
+        except EOFError as error:
+            raise NotRunningError(args.command) from error
+
+
 def _emit(args: argparse.Namespace) -> int:
-    """Hand one event to the running controller's mocks, through the signal directory.
+    """Hand one event to the running controller's mocks.
 
     The event is checked as a scenario event is, and lands at the controller's next tick.
     """
-    if not _alive(args.signal / PID):
-        raise NotRunningError(args.command)
     fields = {f.name: f.default for f in dataclasses.fields(Event)}
     given: dict[str, object] = {}
     for name, value in args.fields:
@@ -241,49 +262,8 @@ def _emit(args: argparse.Namespace) -> int:
     at = "1970-01-01T00:00:00Z"  # pragma: no mutate, a placeholder: it lands at the next tick
     values = adapter.dump_python(adapter.validate_python({**given, "kind": args.kind, "at": at}))
     record = {"kind": args.kind, **{name: values[name] for name in given}}
-    events = args.signal / EVENTS
-    events.mkdir(exist_ok=True)
-    replace_text(events / f"{time.time_ns()}-{args.kind}.json", json.dumps(record))
+    list(_ask(args, {"emit": record}))  # an emit's reply is only its end
     _show(f"emitted {json.dumps(record)}")
-    return 0
-
-
-def _start(args: argparse.Namespace) -> int:
-    """Start the controller in the background, unless one is running; say which."""
-    pid = args.signal / PID
-    if _alive(pid):
-        _show(f"controller already running (pid {pid.read_text()})")
-        return 0
-    _sites(args, load(args.inventory))
-    flags = [
-        w
-        for k in (*SETTINGS, "tick_ms", "site")
-        for w in (f"--{k.replace('_', '-')}", str(getattr(args, k)))
-    ]
-    # It outlives this command, so it is not opened in a `with`.
-    started = subprocess.Popen(  # noqa: S603  # pylint: disable=consider-using-with
-        [sys.executable, "-m", "sharectl", "run", *flags],
-        stdout=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    while not (_alive(pid) and pid.read_text() == str(started.pid)):
-        if started.poll() is not None:
-            raise StartError
-        time.sleep(0.01)  # pragma: no mutate, poll interval
-    _show(f"controller started (pid {started.pid})")
-    return 0
-
-
-def _stop(args: argparse.Namespace) -> int:
-    """Stop the running controller, and wait until it has."""
-    pid = args.signal / PID
-    if not _alive(pid):
-        _show("no controller running")
-        return 0
-    os.kill(int(pid.read_text()), signal.SIGTERM)
-    while _alive(pid):
-        time.sleep(0.01)  # pragma: no mutate, poll interval
-    _show("controller stopped")
     return 0
 
 
@@ -292,28 +272,6 @@ def _wait(args: argparse.Namespace) -> int:
 
     Stops with an error if the controller is not running, or stops while this waits.
     """
-    pid, clock, screen, shown = (args.signal / name for name in (PID, CLOCK, SCREEN, SHOWN))
-    until: datetime | None = None  # pragma: no mutate, falsy until the clock is first read
-    while True:
-        if not _alive(pid):
-            raise NotRunningError(args.command)
-        now = datetime.fromisoformat(clock.read_text()) if clock.exists() else None
-        if now and not until:
-            until = now + timedelta(minutes=args.minutes)
-        lines: list[str] = screen.read_text().split("\n")[:-1] if screen.exists() else []
-        done = int(shown.read_text()) if shown.exists() else 0
-        for line in lines[done:]:
-            _show(line)
-        shown.write_text(str(len(lines)))
-        if now and until and now >= until:
-            return 0
-        time.sleep(0.01)  # pragma: no mutate, poll interval
-
-
-def _alive(pid: Path) -> bool:
-    """Say whether the process whose id `pid` holds is running."""
-    try:
-        os.kill(int(pid.read_text()), 0)  # pragma: no mutate, signal 0 only asks if it runs
-    except FileNotFoundError, ProcessLookupError, ValueError:
-        return False
-    return True
+    for line in _ask(args, {"wait": args.minutes}):
+        _show(line)
+    return 0

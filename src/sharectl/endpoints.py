@@ -1,8 +1,4 @@
-"""The dummy endpoints the controller talks to, answering in each real API's shapes.
-
-Each one answers from the simulated estate. The shapes are those in
-`docs/reviews/vendor-facts-2026-10-28-endpoints.md`.
-"""
+"""The dummy endpoints the controller talks to, each answering from the simulated estate."""
 
 import base64
 import json
@@ -67,11 +63,7 @@ PRESSURES = (
     ("DiskPressure", "KubeletHasNoDiskPressure", "kubelet has no disk pressure"),
     ("PIDPressure", "KubeletHasSufficientPID", "kubelet has sufficient PID available"),
 )
-"""A node's pressure conditions, each with kubelet's healthy reason and message.
-
-That all four go `Unknown` with Ready is verified; these reasons and messages are from kubelet's
-usual output, not verified.
-"""
+"""A node's pressure conditions, each with kubelet's healthy reason and message."""
 
 
 class Kubernetes:
@@ -88,7 +80,6 @@ class Kubernetes:
         pods = f"/api/v1/namespaces/{re.escape(self._namespace)}/pods/(?P<pod>[^/?]+)"
         self._routes = (
             ("GET", re.compile(r"/api/v1/pods"), self._pods),
-            ("GET", re.compile(r"/api/v1/nodes"), self._nodes),
             ("PATCH", re.compile(r"/api/v1/nodes/(?P<node>[^/]+)"), self._patch),
             ("DELETE", re.compile(r"/api/v1/nodes/(?P<node>[^/]+)"), self._delete_node),
             ("POST", re.compile(f"{pods}/eviction"), self._evict),
@@ -130,28 +121,15 @@ class Kubernetes:
 
     def _node(self, name: str) -> Message:
         world = self.world
-        silent = world.silent.get(name)
-        ready = (
-            {
-                "status": "Unknown",
-                "reason": "NodeStatusUnknown",
-                "message": "Kubelet stopped posting node status.",
-                "lastHeartbeatTime": stamp(silent),
-                "lastTransitionTime": stamp(silent),
-            }
-            if silent
-            else {
-                "status": "True",
-                "reason": "KubeletReady",
-                "message": "kubelet is posting ready status",
-                "lastHeartbeatTime": stamp(world.now),
-                "lastTransitionTime": stamp(world.started),
-            }
-        )
+        ready = {
+            "status": "True",
+            "reason": "KubeletReady",
+            "message": "kubelet is posting ready status",
+            "lastHeartbeatTime": stamp(world.now),
+            "lastTransitionTime": stamp(world.started),
+        }
         pressures = [
-            {"type": kind, **ready}
-            if silent
-            else {"type": kind, **ready, "status": "False", "reason": reason, "message": message}
+            {"type": kind, **ready, "status": "False", "reason": reason, "message": message}
             for kind, reason, message in PRESSURES
         ]
         return {
@@ -161,10 +139,6 @@ class Kubernetes:
             "spec": {"unschedulable": True} if name in self.kube.cordoned else {},
             "status": {"conditions": [{"type": "Ready", **ready}, *pressures]},
         }
-
-    def _nodes(self, _: Message) -> tuple[int, Message]:
-        items = [self._node(name) for name in self.kube.nodes]
-        return 200, {"kind": "NodeList", "apiVersion": "v1", "items": items}
 
     def _patch(self, body: Message, node: str) -> tuple[int, Message]:
         if node not in self.kube.nodes:
@@ -194,7 +168,7 @@ class Kubernetes:
 
 
 class Leases:
-    """Kilima's lease API. Kilima publishes none, so these shapes are this design's own."""
+    """Kilima's lease API: the release of a lease."""
 
     def __init__(self, world: World) -> None:
         """Answer for every lease Share holds."""
@@ -202,21 +176,14 @@ class Leases:
         self.world = world
 
     def request(self, method: str, path: str) -> tuple[int, Message]:
-        """`GET /v1/leases/{id}` for a lease's state; `POST /v1/leases/{id}/release` to end it."""
-        world = self.world
-        match = re.fullmatch(r"/v1/leases/(?P<lease>[^/]+)(?P<release>/release)?", path)
-        leased = world.inventory.leases
-        if not match or match["lease"] not in leased:
+        """`POST /v1/leases/{id}/release` to end a lease; Kilima tells, so nothing else is read."""
+        match = re.fullmatch(r"/v1/leases/(?P<lease>[^/]+)/release", path)
+        if not match or match["lease"] not in self.world.inventory.leases:
             return 404, {"message": "no such lease"}
-        lease = match["lease"]
-        if (method, bool(match["release"])) not in {("GET", False), ("POST", True)}:
+        if method != "POST":
             return 405, {"message": "method not allowed"}
-        if match["release"]:
-            world.released.add(lease)
-            return 204, {}
-        reclaim = world.notices.get(lease)
-        state = "released" if lease in world.released else "reclaiming" if reclaim else "active"
-        return 200, {"id": lease, "state": state, "reclaimAt": stamp(reclaim) if reclaim else None}
+        self.world.released.add(match["lease"])
+        return 204, {}
 
 
 class Spire:

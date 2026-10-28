@@ -14,7 +14,6 @@ def test_isolates_after_no_region_answers_for_confirm_seconds() -> None:
     )
     assert memory.isolated is True
     assert decisions[0].page is False
-    assert decisions[0].limited is False
 
 
 def test_a_region_answering_on_any_path_resets_the_confirmation() -> None:

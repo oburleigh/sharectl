@@ -2,13 +2,13 @@ import base64
 from dataclasses import replace
 from datetime import datetime, timedelta
 
-lazy import pytest
+import pytest
 
 from builders import ALL_PATHS, INVENTORY, KILIMA, MOMBASA, T0, at
 from sharectl.controller import Controller
 from sharectl.endpoints import Gnmi, Kubernetes, Leases, Message
 from sharectl.log import line
-from sharectl.model import Layer
+from sharectl.model import Decision, Layer, Memory, Outcome, State
 from sharectl.world import World
 
 HANDOFF = "mba-node-1/eth-1-12"
@@ -117,7 +117,7 @@ def test_an_isolated_site_holds_its_records_and_ships_them_first_on_rejoin_with_
 def test_a_reclaim_drains_then_fences_then_releases_the_partner_vm() -> None:
     world = World(INVENTORY, T0)
     controller = Controller(world, MOMBASA, T0)
-    world.notices[KILIMA] = at(600)
+    controller.told(KILIMA, at(600))
     run(world, controller, (0, 10))
     kube = world.kubes["mombasa"]
     assert [p.resource for p in kube.pods if p.resource == KILIMA] == []
@@ -145,7 +145,7 @@ def test_a_reclaim_during_the_cut_runs_at_the_isolated_site_and_reaches_the_clou
     controller = Controller(world, MOMBASA, T0)
     world.cut("mombasa", ["*"], ALL_PATHS, down=True)
     run(world, controller, (0, 30))
-    world.notices[KILIMA] = at(640)
+    controller.told(KILIMA, at(640))
     run(world, controller, (40, 520))
     assert world.released == {KILIMA}
     assert not world.cloud.records
@@ -215,37 +215,32 @@ def test_the_isolation_record_has_every_field_of_the_platform_decision_event() -
     assert [r["sequence"] for r in controller.log] == ["1", "2", "3", "4"]
 
 
-def test_a_silent_leased_resource_is_drained_fenced_after_grace_and_released() -> None:
+def test_a_refused_decision_is_logged_and_not_acted_on(monkeypatch: pytest.MonkeyPatch) -> None:
     world = World(INVENTORY, T0)
     controller = Controller(world, MOMBASA, T0)
-    world.silent[KILIMA] = at(0)
-    run(world, controller, (0, 650))
+    rule = next(r for r in INVENTORY.rules if r.id == "drain-on-reclaim")
+    refused = Decision(
+        rule=rule,
+        subject=KILIMA,
+        reason="not here",
+        observed={},
+        outcome=Outcome.REFUSED,
+        resource=KILIMA,
+        page=True,
+    )
+
+    def refuse(state: State) -> tuple[list[Decision], Memory]:
+        return [refused], state.memory
+
+    monkeypatch.setattr("sharectl.controller.decide", refuse)
+    run(world, controller, (0, 0))
 
     assert outcomes(controller) == [
-        "03:00:31 site/mombasa drain-on-reclaim@v1 [resource.reclaimed] cordon-and-drain: "
-        f"cordon {KILIMA} and evict 4 of its 4 pods, each service at or above its min; "
-        "fence at 03:10:31, release at 03:10:41 -> applied",
-        f"03:10:31 site/mombasa fence@v1 [reclaim.fence-time] fence: {KILIMA} holds 0 pods of "
-        "Share's, deleted; identity revoked; node deleted; disk key revoked; disks wiped "
-        "-> applied",
-        f"03:10:41 site/mombasa release@v1 [reclaim.release-time] release-lease: release {KILIMA}: "
-        "its owner reclaimed it -> applied",
-    ]
-
-
-def test_a_refused_decision_is_logged_and_not_acted_on() -> None:
-    world = World(INVENTORY, T0)
-    controller = Controller(world, MOMBASA, T0)
-    controller.memory = replace(controller.memory, actions=(at(0),) * 10)
-    world.silent[KILIMA] = at(0)
-    run(world, controller, (0, 40))
-
-    assert outcomes(controller) == [
-        "03:00:31 site/mombasa drain-on-reclaim@v1 [resource.reclaimed] cordon-and-drain: "
-        "10 unforced actions in the last hour, the cap is 10: frozen, a human decides -> refused"
+        "03:00:01 site/mombasa drain-on-reclaim@v1 [resource.reclaimed] cordon-and-drain: "
+        "not here -> refused"
     ]
     assert controller.log[1]["data"]["page"] is True
-    assert len([p for p in world.kubes["mombasa"].pods if p.resource == KILIMA]) == 4
+    assert not [text for _, text in world.notes if " -> " in text]
 
 
 def test_one_uplinks_link_down_with_the_other_up_is_not_isolation() -> None:
@@ -377,7 +372,7 @@ def eviction(pod: str) -> str:
 def test_a_reclaim_makes_the_calls_a_drain_a_fence_and_a_release_make_and_shows_each() -> None:
     world = World(INVENTORY, T0)
     controller = Controller(world, MOMBASA, T0)
-    world.notices[KILIMA] = at(600)
+    controller.told(KILIMA, at(600))
     run(world, controller, (0, 480))
 
     assert [(t, text) for t, text in world.notes if " -> " in text] == [
@@ -411,7 +406,7 @@ def test_a_pod_the_drain_could_not_evict_is_deleted_at_once_at_the_fence() -> No
     services = tuple(replace(s, min=2) if s.id == "aaa" else s for s in INVENTORY.services)
     world = World(replace(INVENTORY, services=services), T0)
     controller = Controller(world, MOMBASA, T0)
-    world.notices[KILIMA] = at(600)
+    controller.told(KILIMA, at(600))
     run(world, controller, (0, 300))
 
     calls = [(t, text) for t, text in world.notes if " -> " in text]
@@ -464,51 +459,10 @@ def test_a_management_path_alone_coming_back_does_not_rejoin_the_site() -> None:
     ]
 
 
-def test_a_notice_is_read_from_the_lease_api_not_the_world(monkeypatch: pytest.MonkeyPatch) -> None:
-    world = World(INVENTORY, T0)
-    controller = Controller(world, MOMBASA, T0)
-
-    real = Leases.request
-
-    def reclaiming(self: Leases, method: str, path: str) -> tuple[int, Message]:
-        status, body = real(self, method, path)
-        return status, {**body, "state": "reclaiming", "reclaimAt": "2026-10-03T03:10:01Z"}
-
-    monkeypatch.setattr(Leases, "request", reclaiming)
-    run(world, controller, (0, 0))
-
-    assert outcomes(controller)[0].startswith("03:00:01 site/mombasa drain-on-reclaim@v1")
-    assert not world.notices
-
-
-def test_silence_is_read_from_the_nodes_list_not_the_world(monkeypatch: pytest.MonkeyPatch) -> None:
-    world = World(INVENTORY, T0)
-    controller = Controller(world, MOMBASA, T0)
-
-    real = Kubernetes.request
-
-    def silent(self: Kubernetes, method: str, path: str, *sent: Message) -> tuple[int, Message]:
-        status, body = real(self, method, path, *sent)
-        if path == "/api/v1/nodes":
-            for node in body["items"]:
-                if node["metadata"]["name"] == KILIMA:
-                    for condition in node["status"]["conditions"]:
-                        condition.update(
-                            status="Unknown", lastTransitionTime="2026-10-03T03:00:01Z"
-                        )
-        return status, body
-
-    monkeypatch.setattr(Kubernetes, "request", silent)
-    run(world, controller, (0, 30))
-
-    assert outcomes(controller)[0].startswith("03:00:31 site/mombasa drain-on-reclaim@v1")
-    assert not world.silent
-
-
 def test_pods_are_read_from_the_pod_list_not_the_world(monkeypatch: pytest.MonkeyPatch) -> None:
     world = World(INVENTORY, T0)
     controller = Controller(world, MOMBASA, T0)
-    world.notices[KILIMA] = at(600)
+    controller.told(KILIMA, at(600))
 
     real = Kubernetes.request
 
@@ -523,3 +477,72 @@ def test_pods_are_read_from_the_pod_list_not_the_world(monkeypatch: pytest.Monke
     run(world, controller, (0, 0))
 
     assert "evict 3 of its 3 pods" in outcomes(controller)[0]
+
+
+def test_a_reclaim_notice_told_to_the_controller_is_acted_on_with_no_lease_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+    sent: list[tuple[str, str]] = []
+    real = Leases.request
+
+    def spy(self: Leases, method: str, path: str) -> tuple[int, Message]:
+        sent.append((method, path))
+        return real(self, method, path)
+
+    monkeypatch.setattr(Leases, "request", spy)
+    controller.told(KILIMA, at(600))
+    run(world, controller, (0, 480))
+
+    assert [o.split(" [")[0] for o in outcomes(controller)] == [
+        "03:00:01 site/mombasa drain-on-reclaim@v1",
+        "03:05:01 site/mombasa fence@v1",
+        "03:08:01 site/mombasa release@v1",
+    ]
+    assert sent == [("POST", "/v1/leases/mba-kilima-01/release")]
+
+
+def test_kubernetes_is_read_only_from_the_owner_s_notice_to_the_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+    reads: list[datetime] = []
+    real = Kubernetes.request
+
+    def spy(self: Kubernetes, method: str, path: str, *sent: Message) -> tuple[int, Message]:
+        if method == "GET":
+            reads.append(world.now)
+        return real(self, method, path, *sent)
+
+    monkeypatch.setattr(Kubernetes, "request", spy)
+    run(world, controller, (0, 60))
+    quiet = list(reads)
+    controller.told(KILIMA, at(670))
+    run(world, controller, (70, 700))
+
+    assert not quiet
+    assert reads == [at(s) for s in range(70, 551, 10)]
+
+
+@pytest.mark.parametrize(
+    ("wait", "read"), [(("pending", "aaa"), True), (("isolated", "mombasa"), False)]
+)
+def test_pods_waiting_for_room_keep_kubernetes_read_and_isolation_does_not(
+    monkeypatch: pytest.MonkeyPatch, *, wait: tuple[str, str], read: bool
+) -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+    controller.memory = replace(controller.memory, waits=frozenset({wait}))
+    reads: list[str] = []
+    real = Kubernetes.request
+
+    def spy(self: Kubernetes, method: str, path: str, *sent: Message) -> tuple[int, Message]:
+        reads.append(path)
+        return real(self, method, path, *sent)
+
+    monkeypatch.setattr(Kubernetes, "request", spy)
+    run(world, controller, (0, 0))
+
+    assert reads == (["/api/v1/pods"] if read else [])
