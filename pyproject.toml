@@ -98,6 +98,8 @@ max-returns = 4
 max-statements = 30
 max-bool-expr = 4
 max-locals = 12
+# A Protocol or fake for an outside system with one call has one public method.
+min-public-methods = 1
 
 [tool.pylint.format]
 max-line-length = 100
@@ -106,6 +108,7 @@ max-line-length = 100
 testpaths = ["tests"]
 addopts = ["--strict-markers", "--strict-config", "-ra"]
 xfail_strict = true
+markers = ["script: runs a scenario script as a subprocess through uv"]
 
 [tool.coverage.run]
 branch = true
@@ -115,3 +118,10 @@ source = ["sharectl"]
 fail_under = 95
 show_missing = true
 skip_covered = true
+
+[tool.mutmut]
+source_paths = ["src/sharectl/"]
+also_copy = ["inventory/", "scenarios/"]
+# The scripts run `uv run` on the repository, which mutmut's copy is not.
+pytest_add_cli_args = ["-m", "not script"]
+pytest_add_cli_args_test_selection = ["tests/"]

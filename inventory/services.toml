@@ -1,0 +1,156 @@
+# Services in placement order, from the design's Placement table.
+# class: site-bound never leaves its PoP; anywhere runs in the regions.
+# active and standby copies are per PoP for site-bound, per region for anywhere.
+# min is the disruption budget a drain respects; min_trust: trusted > attested > untrusted.
+
+[[service]]
+id = "api"
+class = "anywhere"
+active = 2
+standby = 0
+min = 1
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "workflow-workers"
+class = "anywhere"
+active = 2
+standby = 0
+min = 1
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "chain-indexer"
+class = "anywhere"
+active = 1
+standby = 0
+min = 1
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "portal"
+class = "anywhere"
+active = 2
+standby = 0
+min = 1
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "sdn-controller"
+class = "site-bound"
+active = 3
+standby = 0
+min = 2
+min_trust = "attested"
+tolerates_reclaimable = true
+spread = "provider"
+
+[[service]]
+id = "aaa"
+class = "site-bound"
+active = 2
+standby = 0
+min = 1
+min_trust = "attested"
+tolerates_reclaimable = true
+spread = "provider"
+roles = ["credential-cache"]
+
+[[service]]
+id = "config-push"
+class = "site-bound"
+active = 1
+standby = 1
+min = 1
+min_trust = "attested"
+tolerates_reclaimable = true
+spread = "provider"
+roles = ["applies-desired"]
+
+[[service]]
+id = "telemetry-collector"
+class = "site-bound"
+active = 2
+standby = 0
+min = 1
+min_trust = "attested"
+tolerates_reclaimable = true
+spread = "provider"
+roles = ["collects"]
+
+[[service]]
+id = "local-log"
+class = "site-bound"
+active = 3
+standby = 0
+min = 2
+min_trust = "attested"
+tolerates_reclaimable = true
+spread = "provider"
+
+[[service]]
+id = "verifier-probe"
+class = "site-bound"
+active = 1
+standby = 1
+min = 1
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "site-controller"
+class = "site-bound"
+active = 1
+standby = 1
+min = 1
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "site-postgres"
+class = "site-bound"
+active = 3
+standby = 0
+min = 2
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "spire-server"
+class = "site-bound"
+active = 3
+standby = 0
+min = 2
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "argocd-core"
+class = "site-bound"
+active = 1
+standby = 0
+min = 0
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "git-mirror"
+class = "site-bound"
+active = 1
+standby = 0
+min = 0
+min_trust = "trusted"
+tolerates_reclaimable = false
+
+[[service]]
+id = "image-mirror"
+class = "site-bound"
+active = 1
+standby = 0
+min = 0
+min_trust = "trusted"
+tolerates_reclaimable = false

@@ -1,0 +1,171 @@
+# The estate: sites, the resources pods run on, network nodes and their handoffs.
+
+[network]
+paths = ["primary", "oob"]           # every pair of sites is joined by each of these paths
+management_only = ["oob"]            # reach a site for operators; carry no desired state or records
+
+[telemetry]
+counters = ["ifHCInOctets"]          # polled on every configured handoff
+poll_minutes = 5
+
+[[site]]
+id = "barcelona"
+code = "bcn"
+role = "pop"
+
+[[site]]
+id = "marseille"
+code = "mrs"
+role = "pop"
+
+[[site]]
+id = "mombasa"
+code = "mba"
+role = "pop"
+
+[[site]]
+id = "E1"
+code = "e1"
+role = "region"
+
+[[site]]
+id = "E2"
+code = "e2"
+role = "region"
+
+[[site]]
+id = "E3"
+code = "e3"
+role = "region"
+
+[[site]]
+id = "cloudflare"
+code = "cf"
+role = "edge"
+
+[[resource]]
+id = "bcn-srv-1"
+site = "barcelona"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "bcn-srv-2"
+site = "barcelona"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "bcn-srv-3"
+site = "barcelona"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "mrs-srv-1"
+site = "marseille"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "mrs-srv-2"
+site = "marseille"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "mrs-srv-3"
+site = "marseille"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "mba-srv-1"
+site = "mombasa"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "mba-srv-2"
+site = "mombasa"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "mba-srv-3"
+site = "mombasa"
+kind = "share-server"
+provider = "share"
+trust = "trusted"
+
+[[resource]]
+id = "mba-kilima-01"
+site = "mombasa"
+kind = "partner-vm"
+provider = "kilima-fibre"
+trust = "attested"                   # a confidential VM whose attestation passed when it joined
+lease = { notice_minutes = 10, paid_by = "share" }
+
+[[resource]]
+id = "e1-cluster"
+site = "E1"
+kind = "region-cluster"
+provider = "aws-paris"
+trust = "trusted"
+
+[[resource]]
+id = "e2-cluster"
+site = "E2"
+kind = "region-cluster"
+provider = "gcp-madrid"
+trust = "trusted"
+
+[[resource]]
+id = "e3-cluster"
+site = "E3"
+kind = "region-cluster"
+provider = "azure-frankfurt"
+trust = "trusted"
+
+[[node]]
+id = "bcn-node-1"
+site = "barcelona"
+
+[[node]]
+id = "mrs-node-1"
+site = "marseille"
+
+[[node]]
+id = "mba-node-1"
+site = "mombasa"
+
+[[handoff]]
+id = "bcn-node-1/eth-1-12"
+node = "bcn-node-1"
+generation = 7
+
+[[handoff]]
+id = "mrs-node-1/eth-1-12"
+node = "mrs-node-1"
+generation = 7
+
+[[handoff]]
+id = "mba-node-1/eth-1-12"
+node = "mba-node-1"
+generation = 7
+
+[[handoff]]
+id = "bcn-node-1/eth-1-13"
+node = "bcn-node-1"
+
+[[handoff]]
+id = "mba-node-1/eth-1-13"
+node = "mba-node-1"
