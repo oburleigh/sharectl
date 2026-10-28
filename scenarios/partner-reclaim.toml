@@ -1,0 +1,47 @@
+# The brief's partner reclaim: Kilima Fibre takes its virtual machine back with ten minutes'
+# notice while the cloud is reachable.
+
+name = "partner-reclaim"
+start = 2026-10-10T10:00:01Z
+end = 2026-10-10T10:10:01Z
+phases = [
+    { at = 2026-10-10T10:00:01Z, title = "Kilima gives ten minutes' notice" },
+    { at = 2026-10-10T10:05:01Z, title = "the fence time" },
+    { at = 2026-10-10T10:08:01Z, title = "the release time" },
+]
+
+[[event]]
+at = 2026-10-10T10:00:01Z
+kind = "reclaim-notice"
+resources = ["mba-kilima-01"]
+notice_minutes = 10
+
+[[expect]]
+at = 2026-10-10T10:00:01Z
+controller = "site/mombasa"
+rule = "drain-on-reclaim@v1"
+action = "cordon-and-drain"
+outcome = "applied"
+reason_contains = "evict 5 of its 5 pods, each service at or above its min; fence at 10:05:01, release at 10:08:01"
+
+[[expect]]
+at = 2026-10-10T10:05:01Z
+controller = "site/mombasa"
+rule = "fence@v1"
+action = "fence"
+outcome = "applied"
+reason_contains = "mba-kilima-01 holds 0 pods of Share's, deleted; identity revoked; node deleted; disks wiped"
+
+[[expect]]
+at = 2026-10-10T10:08:01Z
+controller = "site/mombasa"
+rule = "release@v1"
+action = "release-lease"
+outcome = "applied"
+reason_contains = "release mba-kilima-01: its owner reclaimed it"
+
+[expect_summary]
+decisions_merged = 3
+pods_recreated = 5
+pods_pending = 0
+pods_left_on_released = 0
