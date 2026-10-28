@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from builders import ALL_PATHS, INVENTORY, MOMBASA, T0, at
+from builders import ALL_PATHS, INVENTORY, MOMBASA, T0, at, flap
 from sharectl.controller import Controller
 from sharectl.model import DesiredState
 from sharectl.stubs import FakeConfigPush, FakeSdn
@@ -152,11 +152,7 @@ def test_a_flap_inside_the_stable_time_applies_nothing_until_the_path_is_stable_
     world.cut("mombasa", ["*"], ALL_PATHS, down=True)
     world.advance(at(0))
     world.cloud.write("b", 1, [NEW], at=at(0))
-    world.cut("mombasa", ["*"], ALL_PATHS, down=False)
-    ticks(world, 10, 200)
-    world.cut("mombasa", ["*"], ALL_PATHS, down=True)
-    world.advance(at(210))
-    world.cut("mombasa", ["*"], ALL_PATHS, down=False)
+    flap(world)
     ticks(world, 220, 510)
     assert not pushed(world)
 

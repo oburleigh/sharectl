@@ -16,10 +16,10 @@ def _timed_out(number: int, frame: FrameType | None) -> None:
 
 
 @pytest.fixture(autouse=True)
-def watchdog() -> Iterator[None]:
-    """Fail a test that hangs, rather than hang the run."""
+def watchdog(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Fail a test that hangs, rather than hang the run; a script runs a whole scenario live."""
     previous = signal.signal(signal.SIGALRM, _timed_out)
-    signal.alarm(20)
+    signal.alarm(120 if "script" in request.keywords else 20)
     yield
     signal.alarm(0)
     signal.signal(signal.SIGALRM, previous)

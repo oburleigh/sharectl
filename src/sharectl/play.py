@@ -3,22 +3,27 @@
 import json
 import time
 import tomllib
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from itertools import zip_longest
 from typing import Annotated
-lazy from collections.abc import Callable, Mapping
+lazy from collections.abc import Callable, Generator, Mapping, Sequence
 lazy from pathlib import Path
 
 from pydantic import Field, TypeAdapter
 
 from sharectl.controller import Controller
-from sharectl.log import CONFIRMED, Record, line
+from sharectl.log import CONFIRMED, Record, line, stamp
 from sharectl.model import Inventory, Layer, Outcome, Role
 from sharectl.world import World
 lazy from sharectl.stubs import Coverage
+
+PID, CLOCK, SCREEN, SHOWN, EVENTS = "controller.pid", "clock", "screen.txt", "shown", "events"
+"""The live controller's files in its signal directory: its pid, its clock, its screen, how much of
+the screen `wait` has shown, and the directory events wait in."""
 
 
 class Kind(StrEnum):
@@ -126,6 +131,65 @@ AT_ONCE = Run()
 """Every PoP's controller, with no pause between ticks."""
 
 
+def replace_text(path: Path, text: str) -> None:
+    """Write `text` to `path` so that a reader in another process sees the old text or the new."""
+    part = path.with_name(f"{path.name}.part")
+    part.write_text(text)
+    part.replace(path)
+
+
+@contextmanager
+def _screen(directory: Path, show: Callable[[str], None]) -> Generator[Callable[[str], None]]:
+    """A `show` that also writes each line to `directory/screen.txt` as it is shown."""
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / SCREEN).open("w") as screen:
+
+        def emit(text: str) -> None:
+            screen.write(f"{text}\n")
+            screen.flush()
+            show(text)
+
+        yield emit
+
+
+class Live:
+    """The estate with its mocks, running from a start for ever, taking each event sent to them."""
+
+    def __init__(self, inventory: Inventory, signal: Path, *, run: Run) -> None:
+        """Listen on `signal`, running the controllers `run` names at its pace."""
+        super().__init__()
+        self.inventory, self.signal, self.run = inventory, signal, run
+
+    def listen(
+        self, start: datetime, show: Callable[[str], None], until: datetime | None = None
+    ) -> None:
+        """Run from `start` until `until`, or for ever.
+
+        Each tick takes every event waiting in `signal/events`, in name order, into the mocks,
+        then steps each controller. The clock goes to `signal/clock` and every line to
+        `signal/screen.txt`.
+        """
+        scenario = TypeAdapter(Scenario).validate_python(
+            {"name": "live", "start": start, "end": start}
+        )
+        with _screen(self.signal, show) as emit:
+            player = Player(scenario, self.inventory, emit, sites=self.run.sites)
+            player.run(self.run.pace, until, take=self._take, tock=self._tock)
+
+    def _tock(self, now: datetime) -> None:
+        """Publish the clock, for `wait`."""
+        replace_text(self.signal / CLOCK, stamp(now))
+
+    def _take(self, now: datetime) -> list[Event]:
+        """Every event waiting, in name order, landing at `now`; each is taken once."""
+        adapter = TypeAdapter(Event)
+        taken: list[Event] = []
+        for path in sorted((self.signal / EVENTS).glob("*.json")):
+            taken.append(adapter.validate_python({**json.loads(path.read_text()), "at": now}))
+            path.unlink()
+        return taken
+
+
 def play(
     scenario: Scenario,
     inventory: Inventory,
@@ -139,16 +203,9 @@ def play(
     Every line also goes to `out/<scenario>/screen.txt` as it is shown.
     """
     directory = out / scenario.name
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "screen.txt").open("w") as screen:
-
-        def emit(text: str) -> None:
-            screen.write(f"{text}\n")
-            screen.flush()
-            show(text)
-
+    with _screen(directory, show) as emit:
         player = Player(scenario, inventory, emit, sites=run.sites)
-        player.run(run.pace)
+        player.run(run.pace, scenario.end)
         failures = player.report()
         player.write(directory)
         emit(f"{scenario.name}: {'FAIL' if failures else 'pass'}")
@@ -179,11 +236,32 @@ class Player:
         )
         self.controllers = [Controller(self.world, site, scenario.start) for site in pops]
         self.decided: list[Record] = []
-        self._tick = timedelta(seconds=inventory.params.tick_seconds)
+        self.tick = timedelta(seconds=inventory.params.tick_seconds)
         self._shown = 0, [0] * len(self.controllers)  # pragma: no mutate, nothing to skip yet
 
-    def run(self, pace: float) -> None:
-        """Show the controllers running and the boot placement, then run the clock to the end."""
+    def run(
+        self,
+        pace: float,
+        until: datetime | None,
+        *,
+        take: Callable[[datetime], Sequence[Event]] = lambda _: (),
+        tock: Callable[[datetime], None] = lambda _: None,
+    ) -> None:
+        """Show the controllers and the boot placement, then run the clock from the start.
+
+        It runs until `until`, or for ever when that is None. Each tick lands the events `take`
+        gives, steps, then calls `tock`.
+        """
+        self.boot()
+        now = self.scenario.start
+        while until is None or now <= until:
+            self.step(now, arrived=take(now))
+            tock(now)
+            time.sleep(pace)
+            now += self.tick
+
+    def boot(self) -> None:
+        """Show the controllers running and where Kubernetes placed each site's pods."""
         self.emit("controllers: " + ", ".join(c.name for c in self.controllers))
         for site, kube in self.world.kubes.items():
             on = sorted(str(p.resource) for p in kube.pods)
@@ -191,17 +269,15 @@ class Player:
                 self.emit(
                     f"boot {site}: " + ", ".join(f"{r} {on.count(r)}" for r in dict.fromkeys(on))
                 )
-        now = self.scenario.start
-        while now <= self.scenario.end:
-            self.step(now)
-            time.sleep(pace)
-            now += self._tick
 
-    def step(self, now: datetime) -> None:
-        """One tick: the due faults land as the world advances, then each controller steps."""
-        due = [e for e in self.scenario.events if now - self._tick < e.at <= now]
+    def step(self, now: datetime, arrived: Sequence[Event] = ()) -> None:
+        """One tick: the due faults and those `arrived` land as the world advances.
+
+        Then each controller steps.
+        """
+        due = [*(e for e in self.scenario.events if now - self.tick < e.at <= now), *arrived]
         self.world.advance(now, faults=[partial(self._inject, e) for e in due])
-        for phase in (p for p in self.scenario.phases if now - self._tick < p.at <= now):
+        for phase in (p for p in self.scenario.phases if now - self.tick < p.at <= now):
             self.emit(f"{phase.at:%H:%M:%S} [phase] {phase.title}")
         for controller in self.controllers:
             controller.step()
@@ -254,11 +330,7 @@ class Player:
         """Show the coverage and the summary, then every difference from the file; return them."""
         summary = self.summary()
         for row in self.world.cloud.coverage:
-            self.emit(
-                f"cloud coverage {row.handoff} {row.counter}: {row.held} held, "
-                f"{row.resent} resent, {row.expected} expected, {row.unique} unique, "
-                f"{row.duplicates} duplicates dropped, {row.missing} missing"
-            )
+            self.emit(self.world.text("cloud_coverage", **asdict(row)))
         self.emit("summary: " + ", ".join(f"{k} {v}" for k, v in summary.items()))
         failures = [*self._decisions(), *self._pushes(), *self._coverage()] + [
             f"summary {key}: {summary.get(key)}, expected {wanted}"

@@ -61,6 +61,14 @@ class Network:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class Cluster:
+    """The namespace Share's pods run in at every site, and the trust domain its nodes join."""
+
+    namespace: str
+    trust_domain: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Telemetry:
     """The counters polled on every configured handoff, and how often."""
 
@@ -70,19 +78,29 @@ class Telemetry:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Site:
-    """A PoP, a cloud region or the edge."""
+    """A PoP, a cloud region or the edge; a region names its BGP neighbour on each path."""
 
     id: str
     code: Annotated[str, Field(pattern=r"^[a-z0-9-]+$")]
     role: Role
+    peers: Mapping[str, IPv4Address] = frozendict()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Fence:
+    """What a fence revokes on a resource: its SPIRE agent's SPIFFE ID path and its disks' key."""
+
+    identity: str
+    disk_key: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Lease:
-    """The terms on which Share uses a resource another party owns."""
+    """The terms on which Share uses a resource another party owns, and what it revokes."""
 
     notice_minutes: int
     paid_by: str
+    fence: Fence
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -163,6 +181,7 @@ class Inventory:  # pylint: disable=too-many-instance-attributes
     """The estate, the services, the rules, the refusal reasons and the stubs' screen lines."""
 
     network: Network
+    cluster: Cluster
     telemetry: Telemetry
     sites: tuple[Site, ...] = Field(alias="site")
     resources: tuple[Resource, ...] = Field(alias="resource")
@@ -175,9 +194,14 @@ class Inventory:  # pylint: disable=too-many-instance-attributes
     lines: Mapping[str, str]
 
     @property
-    def regions(self) -> tuple[str, ...]:
-        """The ids of the sites of role `region`, in file order."""
-        return tuple(s.id for s in self.sites if s.role is Role.REGION)
+    def regions(self) -> tuple[Site, ...]:
+        """The sites of role `region`, in file order."""
+        return tuple(s for s in self.sites if s.role is Role.REGION)
+
+    @property
+    def leases(self) -> dict[str, Lease]:
+        """Each leased resource's id and its lease."""
+        return {r.id: r.lease for r in self.resources if r.lease}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -23,7 +23,7 @@ class Kube:
         }
         self.nodes = {r.id: r for r in inventory.resources if r.site == site.id}
         self._shared = site.role is Role.REGION
-        self._cordoned: set[str] = set()
+        self.cordoned: set[str] = set()
         self.pods = [
             Pod(service=s.id, resource=None, standby=copy >= s.active)
             for s in self._services.values()
@@ -42,7 +42,7 @@ class Kube:
 
     def cordon(self, resource: str) -> None:
         """Take no new pod on `resource`."""
-        self._cordoned.add(resource)
+        self.cordoned.add(resource)
 
     def evict(self, pods: tuple[Pod, ...]) -> None:
         """Evict `pods`; they wait pending for the next reconcile."""
@@ -62,7 +62,7 @@ class Kube:
         allowed = [
             r
             for r in self.nodes.values()
-            if r.id not in self._cordoned
+            if r.id not in self.cordoned
             and r.trust.meets(service.min_trust)
             and (r.lease is None or service.tolerates_reclaimable)
             and (self._shared or r not in copies)

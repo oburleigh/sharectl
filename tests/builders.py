@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sharectl.inventory import load
 from sharectl.model import Decision, Memory, Pod, State
+lazy from sharectl.world import World
 
 INVENTORY = load(Path(__file__).parent.parent / "inventory")
 T0 = datetime(2026, 10, 3, 3, 0, 1, tzinfo=UTC)
@@ -62,3 +63,19 @@ def recreated_rows(time: str) -> list[dict[str, object]]:
         {"time": time, "site": "mombasa", "action": "recreate", "service": s, "resource": r}
         for s, r in RECREATED
     ]
+
+
+def flap(world: World) -> None:
+    """Bring Mombasa's paths back at 10 s, drop them at 210 s, and back for good at 220 s."""
+    world.cut("mombasa", ["*"], ALL_PATHS, down=False)
+    for seconds in range(10, 201, 10):
+        world.advance(at(seconds))
+    world.cut("mombasa", ["*"], ALL_PATHS, down=True)
+    world.advance(at(210))
+    world.cut("mombasa", ["*"], ALL_PATHS, down=False)
+
+
+def reached(world: World, site: str) -> int:
+    """How many regions `site` reaches on any path, link and session both up."""
+    regions = world.inventory.regions
+    return sum(any(world.reaches(site, r.id, path) for path in ALL_PATHS) for r in regions)

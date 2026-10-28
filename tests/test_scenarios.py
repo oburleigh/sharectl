@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from builders import ALL_PATHS, INVENTORY, RECREATED, recreated_rows
+from builders import ALL_PATHS, INVENTORY, RECREATED, reached, recreated_rows
 from sharectl.model import Layer, Outcome
 from sharectl.play import Event, Kind, Player, load_scenario, play
 from sharectl.stubs import Coverage
@@ -116,6 +116,10 @@ def test_the_fibre_cut_shows_and_writes_the_reconciliation(tmp_path: Path) -> No
     assert "boot mombasa: mba-kilima-01 4, mba-srv-1 6, mba-srv-2 6, mba-srv-3 6" in shown
     assert [line for line in shown if " aaa at " in line] == [
         "03:12:11 aaa at mombasa still answers from the local credential copy",
+    ]
+    assert [line for line in shown if " site-log " in line] == [
+        "09:17:11 site-log at mombasa ships what it held, its own check having seen the link "
+        "stable for 300 s: decision records 4, events 1, intervals 73, resent 3"
     ]
     assert [line for line in shown if " config-push " in line] == [
         "03:02:11 config-push at barcelona applied gen 8 to bcn-node-1/eth-1-12 (above applied 7)",
@@ -228,7 +232,17 @@ def test_each_phase_heads_the_lines_from_its_time(tmp_path: Path) -> None:
         "10:00:01 site/marseille",
         "10:00:01 site/mombasa",
     ]
-    assert shown[heading + 4].startswith("10:00:01 site/mombasa drain-on-reclaim@v1")
+    assert shown[heading + 4] == (
+        "10:00:01 site/mombasa PATCH /api/v1/nodes/mba-kilima-01 "
+        '{"spec": {"unschedulable": true}} -> 200'
+    )
+    assert [line.split("/pods/")[1].split("/")[0] for line in shown[heading + 5 : heading + 9]] == [
+        "sdn-controller-1",
+        "aaa-1",
+        "config-push-1",
+        "telemetry-collector-1",
+    ]
+    assert shown[heading + 9].startswith("10:00:01 site/mombasa drain-on-reclaim@v1")
 
 
 def test_a_second_play_writes_over_the_first(tmp_path: Path) -> None:
@@ -349,8 +363,8 @@ def test_a_paths_event_cuts_only_sessions_when_its_layer_says_so() -> None:
 
     player.step(scenario.start)
 
-    assert player.world.regions_reachable("mombasa") == (0, False)
-    assert player.world.data_links_up("mombasa") == 2
+    assert (reached(player.world, "mombasa"), player.world.data_path_up("mombasa")) == (0, False)
+    assert [up for _, up in player.world.links_up("mombasa")] == [True, True, True]
 
 
 def test_a_paths_event_with_a_layer_that_is_not_link_or_session_is_rejected(
@@ -376,5 +390,5 @@ def test_a_paths_event_with_no_layer_takes_the_links_down_whatever_its_sites() -
 
     player.step(scenario.start)
 
-    assert player.world.regions_reachable("mombasa") == (0, False)
-    assert player.world.data_links_up("mombasa") == 0
+    assert (reached(player.world, "mombasa"), player.world.data_path_up("mombasa")) == (0, False)
+    assert [up for _, up in player.world.links_up("mombasa")] == [False, False, False]

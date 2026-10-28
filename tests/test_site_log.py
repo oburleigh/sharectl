@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from builders import ALL_PATHS, DATA_PATHS, INVENTORY, T0, at
+from builders import ALL_PATHS, DATA_PATHS, INVENTORY, T0, at, flap
 from sharectl.model import DesiredState
 from sharectl.world import World
 lazy from sharectl.stubs import Batch
@@ -89,3 +89,16 @@ def test_the_resend_takes_the_last_intervals_of_each_handoff_and_counter() -> No
         ("13", "03:05"),
         ("13", "03:10"),
     ]
+
+
+def test_a_flap_inside_the_stable_time_holds_everything_until_the_link_settles_again() -> None:
+    world = World(INVENTORY, T0)
+    world.cut("mombasa", ["*"], ALL_PATHS, down=True)
+    world.advance(at(0))
+    world.site_logs["mombasa"].write(RECORD)
+    flap(world)
+    ticks(world, 220, 520)
+    assert not world.cloud.records
+
+    world.advance(at(530))
+    assert world.cloud.records == {"x/proposed": RECORD}

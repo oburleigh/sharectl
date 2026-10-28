@@ -13,7 +13,38 @@ configuration push applies each order as it arrives, and the controller is never
 
 Version 1 runs against a simulated estate: three PoPs (Barcelona, Marseille and Mombasa), three cloud
 regions, Cloudflare at the edge and one Kilima Fibre VM at Mombasa. The cloud, the chain,
-configuration push, the SDN controller, the site log, AAA and telemetry are stubs.
+configuration push, the SDN controller, the site log, AAA and telemetry are stubs. The controller
+sees and changes its site only through the APIs a deployed one would use, each a dummy here that
+answers in the real API's shape: gNMI on its network node, the Kubernetes API, Kilima's lease API,
+SPIRE, Share's KMS and the Talos machine API (see What the controller calls).
+
+## How it works
+
+The controller runs all the time, one per PoP, on a loop of 10 s ticks. Every tick it asks its
+site what is going on, decides, acts and logs. Nothing has to tell it about a fault for it to see
+one. What it learns, it learns in one of two ways:
+
+- **By polling.** It asks its network node over gNMI for each path's BFD peer and the BGP session
+  to each cloud region. That is how it finds a fibre cut: the paths go down, the next poll sees it,
+  and 30 s later it decides the site is cut off. It also asks Kubernetes which pods run where and
+  whether a node has gone silent.
+- **By being told.** A partner that wants its VM back says so through its lease API, which the
+  controller reads every tick. That is how it hears about a reclaim.
+
+When it acts, it makes the calls a person would: cordon and evict through the Kubernetes API, then
+at the fence ban the node's SPIRE agent, delete the node, disable its disk key in KMS and reset it
+through Talos, then release the lease. Every call shows on screen with the status that came back.
+
+Some things are deliberately not the controller's job. Configuration push applies network orders,
+and the site log's shipper sends the site's records to the cloud. Each checks the link for itself:
+it waits until the link has been up for five minutes without a drop, so a flapping link holds
+everything until it settles. The controller never tells either of them when to go. It makes the
+same check for its own decision that the site has rejoined, which is why all three happen in the
+same tick.
+
+In version 1 the outside world is simulated and every endpoint is a dummy that answers in the
+real API's shape. The scenario scripts play the outside world: they cut the fibre, send Kilima's
+notice, and let simulated time pass.
 
 ## Install
 
@@ -51,21 +82,38 @@ From the repository root, with the scripts and `uv`, or with `make` if you have 
 
 | What | Script or `uv` | `make` |
 | --- | --- | --- |
-| The fibre cut, about 50 s: six hours of cut at 20 ms per 10 s tick | `./scripts/fibre-cut.sh` | `make fibre-cut` |
-| The partner reclaim, about 2 s | `./scripts/partner-reclaim.sh` | `make partner-reclaim` |
-| The controller, live, waiting for files | `uv run sharectl run --site mombasa` | `make run` |
-| Both scenarios, at once unless `--tick-ms` paces them | `uv run sharectl demo --site mombasa` | `make demo` |
+| The fibre cut, live, about a minute: six hours of cut at 20 ms per 10 s tick | `./scripts/fibre-cut.sh` | `make fibre-cut` |
+| The partner reclaim, live, a few seconds | `./scripts/partner-reclaim.sh` | `make partner-reclaim` |
+| The controller, live, on its own | `uv run sharectl run --site mombasa` | `make run` |
+| Both scenarios, checked against what they expect, at once | `uv run sharectl demo --site mombasa` | `make demo` |
 | The tests | `uv run pytest` | `make test` |
 
 `make` reads `.env` when it exists and uses Mombasa when no site is set (see Settings). Flags go
 after a script, or in `ARGS` for `make`: `./scripts/fibre-cut.sh --tick-ms 5` or
 `make fibre-cut ARGS="--tick-ms 5"`.
 
-Each script hands its scenario to the controller, starting one if none is running, and prints the
-controller's lines as they happen. It ends with `<scenario>: pass` or `<scenario>: FAIL` and exits
-0 only on a pass. To watch the controller on its own, start it with `make run` (or the `uv` command
-above) in one terminal and run the scripts in another. `uv run sharectl scenario --site mombasa
-scenarios/fibre-cut.toml` plays one file at once.
+The scripts are the outside world, and the controller is running throughout. Each script starts
+Mombasa's controller unless one is already running, lets it poll a healthy site for a few minutes,
+then sends the scenario's events and shows the controller's lines as they happen. It stops the
+controller if it started it. The fibre-cut script sends the cut to the fabric and nothing to the
+controller, which finds the cut by polling its node. The partner-reclaim script sends Kilima's
+notice to Kilima's lease API, which the controller reads. To watch the controller on its own, run
+`make run` in one terminal and a script in another.
+
+The scripts use four commands, which work by hand too:
+
+| Command | What it does |
+| --- | --- |
+| `sharectl start --site mombasa` | Starts the controller in the background unless one is running, and says which |
+| `sharectl emit <kind> field=value ...` | Sends one event to the running controller's mocks; the kinds and fields are a scenario file's events (see Writing a scenario) |
+| `sharectl wait <minutes>` | Shows the controller's new lines until its clock has moved that many simulated minutes on |
+| `sharectl stop` | Stops the running controller |
+
+The clock keeps running while each command starts, about eight simulated minutes per second of
+start-up at the default pace, so the gaps between a script's events are a little longer than it
+asks for. `uv run sharectl play --site mombasa scenarios/fibre-cut.toml` plays a scenario file on
+its own clock instead, at the same pace, and checks it: it ends with `<scenario>: pass` or
+`<scenario>: FAIL` and exits 0 only on a pass. `sharectl scenario` does the same at once.
 
 ## Settings
 
@@ -79,8 +127,8 @@ line still wins. Copy `.env.example` to `.env` to set them: `make` reads `.env` 
 | `SHARECTL_INVENTORY` | `inventory` | Where the estate, services and rules are read from |
 | `SHARECTL_SCENARIOS` | `scenarios` | Where `demo` finds the scenario files |
 | `SHARECTL_OUT` | `out` | Where each play writes its files |
-| `SHARECTL_SIGNAL` | `signal` | Where `run` waits for files and `play` hands them over |
-| `SHARECTL_TICK_MS` | `20` for `run` and `play`, `0` for `demo` and `scenario` | Wall-clock milliseconds per 10 s tick; `0` plays at once |
+| `SHARECTL_SIGNAL` | `signal` | Where the live controller keeps its pid, clock and screen, and where events sent to it wait |
+| `SHARECTL_TICK_MS` | `20` for `run`, `start` and `play`, `0` for `demo` and `scenario` | Wall-clock milliseconds per 10 s tick; `0` plays at once |
 
 Every PoP runs a controller, and nothing in the code names a site, so a deployed controller is
 told which PoP it runs at, by its manifest, and reads everything else about that PoP from the
@@ -91,18 +139,25 @@ both scenarios are about; each play's first line names the controllers running. 
 ## What it prints
 
 The screen shows the whole simulated estate, not what one controller sees. Lines starting
-`site/mombasa` are the controller's: its polls of its node and its decisions. Every other line comes from a stub, at the site the
+`site/mombasa` are the controller's: its polls of its node, each call it makes to an endpoint with
+the status that came back, and its decisions. Every other line comes from a stub, at the site the
 line names, running without the controller: `kubernetes at mombasa`, `config-push at barcelona`,
-`aaa at mombasa`. `cloud coverage` is the cloud's check when Mombasa's log arrives, and `boot` says
+`aaa at mombasa`, `site-log at mombasa`. `cloud coverage` is the cloud's check when Mombasa's log arrives, and `boot` says
 where Kubernetes placed each site's pods. Mombasa's controller never sees another PoP's lines.
 
-This is the partner reclaim (boot lines for the other five sites left out):
+This is the partner reclaim as `sharectl play` shows it, on the scenario's own clock (boot lines for
+the other five sites left out). The calls come before the decision they carry out:
 
 ```
 controllers: site/mombasa
 boot mombasa: mba-kilima-01 4, mba-srv-1 6, mba-srv-2 6, mba-srv-3 6
 10:00:01 [phase] Kilima gives ten minutes' notice
 10:00:01 site/mombasa poll mba-node-1: uplink-a bfd 192.0.2.9 up, bgp 3/3 established; uplink-b bfd 198.51.100.9 up, bgp 3/3 established; oob bfd 203.0.113.9 up, bgp 3/3 established; 3/3 regions reachable
+10:00:01 site/mombasa PATCH /api/v1/nodes/mba-kilima-01 {"spec": {"unschedulable": true}} -> 200
+10:00:01 site/mombasa POST /api/v1/namespaces/share/pods/sdn-controller-1/eviction {"apiVersion": "policy/v1", "kind": "Eviction", "metadata": {"name": "sdn-controller-1", "namespace": "share"}} -> 201
+10:00:01 site/mombasa POST /api/v1/namespaces/share/pods/aaa-1/eviction {"apiVersion": "policy/v1", "kind": "Eviction", "metadata": {"name": "aaa-1", "namespace": "share"}} -> 201
+10:00:01 site/mombasa POST /api/v1/namespaces/share/pods/config-push-1/eviction {"apiVersion": "policy/v1", "kind": "Eviction", "metadata": {"name": "config-push-1", "namespace": "share"}} -> 201
+10:00:01 site/mombasa POST /api/v1/namespaces/share/pods/telemetry-collector-1/eviction {"apiVersion": "policy/v1", "kind": "Eviction", "metadata": {"name": "telemetry-collector-1", "namespace": "share"}} -> 201
 10:00:01 site/mombasa drain-on-reclaim@v1 [resource.reclaimed] cordon-and-drain: cordon mba-kilima-01 and evict 4 of its 4 pods, each service at or above its min; fence at 10:05:01, release at 10:08:01 -> applied
 10:00:11 kubernetes at mombasa recreated sdn-controller on mba-srv-3
 10:00:11 kubernetes at mombasa recreated aaa on mba-srv-1
@@ -110,8 +165,13 @@ boot mombasa: mba-kilima-01 4, mba-srv-1 6, mba-srv-2 6, mba-srv-3 6
 10:00:11 kubernetes at mombasa recreated telemetry-collector on mba-srv-1
 10:05:01 [phase] the fence time
 10:05:01 site/mombasa poll mba-node-1: uplink-a bfd 192.0.2.9 up, bgp 3/3 established; uplink-b bfd 198.51.100.9 up, bgp 3/3 established; oob bfd 203.0.113.9 up, bgp 3/3 established; 3/3 regions reachable
+10:05:01 site/mombasa spire.api.server.agent.v1.Agent/BanAgent {"id": {"trustDomain": "share.example", "path": "/spire/agent/k8s_psat/mombasa/mba-kilima-01"}} -> OK
+10:05:01 site/mombasa DELETE /api/v1/nodes/mba-kilima-01 -> 200
+10:05:01 site/mombasa TrentService.DisableKey {"KeyId": "arn:aws:kms:eu-west-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"} -> 200
+10:05:01 site/mombasa machine.MachineService/Reset on mba-kilima-01 {"graceful": false, "reboot": false, "mode": "ALL"} -> OK
 10:05:01 site/mombasa fence@v1 [reclaim.fence-time] fence: mba-kilima-01 holds 0 pods of Share's, deleted; identity revoked; node deleted; disk key revoked; disks wiped -> applied
 10:08:01 [phase] the release time
+10:08:01 site/mombasa POST /v1/leases/mba-kilima-01/release -> 204
 10:08:01 site/mombasa release@v1 [reclaim.release-time] release-lease: release mba-kilima-01: its owner reclaimed it -> applied
 10:10:01 site/mombasa poll mba-node-1: uplink-a bfd 192.0.2.9 up, bgp 3/3 established; uplink-b bfd 198.51.100.9 up, bgp 3/3 established; oob bfd 203.0.113.9 up, bgp 3/3 established; 3/3 regions reachable
 summary: generations_applied 0, replays_ignored 0, decisions_merged 3, pods_recreated 4, pods_pending 0, pods_left_on_released 0
@@ -140,14 +200,17 @@ once the cut is confirmed:
 
 And this is the end of the fibre cut. When the link returns, nothing happens for five minutes:
 configuration push, the site log and the controller each wait for the link to stay up that long, by
-their own measure. Then configuration push applies the handoff that went final during the cut, and
-Mombasa rejoins and reconciles in the same tick because it follows the same rule, not because one
-waits for the other. A stale resend of that order is ignored:
+their own measure. Then configuration push applies the handoff that went final during the cut, the
+site log's shipper sends everything it held, and Mombasa's controller says the site has rejoined,
+all in the same tick because each follows the same rule, not because one waits for another. The
+shipper is in charge of its own sending; the controller ships nothing. A stale resend of the order
+is ignored:
 
 ```
 09:12:05 [phase] the link returns
 09:12:11 site/mombasa poll mba-node-1: uplink-a bfd 192.0.2.9 up, bgp 3/3 established; uplink-b bfd 198.51.100.9 up, bgp 3/3 established; oob bfd 203.0.113.9 up, bgp 3/3 established; 3/3 regions reachable
 09:17:11 config-push at mombasa applied gen 1 to mba-node-1/eth-1-13 (above applied 0)
+09:17:11 site-log at mombasa ships what it held, its own check having seen the link stable for 300 s: decision records 4, events 1, intervals 73, resent 3
 09:17:11 site/mombasa poll mba-node-1: uplink-a bfd 192.0.2.9 up, bgp 3/3 established; uplink-b bfd 198.51.100.9 up, bgp 3/3 established; oob bfd 203.0.113.9 up, bgp 3/3 established; 3/3 regions reachable
 09:17:11 site/mombasa site-rejoin@v1 [cloud.reachable] exit-isolated-mode: data path stable for 300 s -> applied
 09:17:11 site/mombasa resume@v1 [unblocked] resume: the site rejoined the cloud -> applied
@@ -180,13 +243,33 @@ byte for byte.
 | `inventory.py` | Reads the estate, services and rules from `inventory/*.toml` and rejects a bad file at start |
 | `model.py` | The types: sites, resources, services, rules, what a controller sees, remembers and decides |
 | `decide.py` | The rules and the limits: given what a controller sees, what it should do and why |
-| `controller.py` | One PoP's controller: looks at its site, decides, acts and logs |
+| `controller.py` | One PoP's controller: polls its node, reads its cluster and leases, decides, acts through the endpoints and logs |
+| `endpoints.py` | The dummy endpoints: gNMI, the Kubernetes API, Kilima's lease API, SPIRE, KMS and Talos, answering in each real API's shape |
 | `log.py` | Turns decisions into log records and screen lines |
 | `world.py` | The simulated estate: links between sites, notices, counters |
 | `kube.py` | Stands in for Kubernetes: places, recreates and deletes pods by the placement rules |
 | `stubs.py` | Stand-ins for the cloud, configuration push, the site log, AAA and telemetry, including the coverage check |
-| `play.py` | Plays a scenario file and checks what happened against what it expects |
-| `cli.py` | The `run`, `play`, `demo` and `scenario` commands |
+| `play.py` | Plays a scenario file and checks what happened against what it expects, or runs the estate live and takes the events sent to it |
+| `cli.py` | The `run`, `start`, `stop`, `wait`, `emit`, `play`, `demo` and `scenario` commands |
+
+## What the controller calls
+
+Every tick the controller asks its site's endpoints what is there, and when it acts it sends the
+requests a real drain, fence and release send. The request and response shapes are checked against
+each vendor's source and docs in `docs/reviews/vendor-facts-2026-10-28-endpoints.md`, which also
+says which parts are derived rather than verified.
+
+| When | Request | Answer |
+| --- | --- | --- |
+| Every tick | gNMI Get on its node: `/bfd/interfaces/interface/peers/peer/state` and the BGP `neighbors/neighbor/state` (OpenConfig, JSON_IETF) | Each BFD peer's `remote-address` and `session-state`, `UP` or `DOWN`, and each BGP neighbour's `session-state`, `ESTABLISHED` or `IDLE` |
+| Every tick | Kubernetes `GET /api/v1/pods` and `GET /api/v1/nodes` | The pods and where they run; a node's `Ready` condition, `Unknown` once it has gone silent |
+| Every tick | Kilima `GET /v1/leases/{id}` | The lease `active`, `reclaiming` with its `reclaimAt`, or `released` |
+| Drain | `PATCH /api/v1/nodes/{node}` `{"spec": {"unschedulable": true}}`, then a policy/v1 Eviction per pod, `POST /api/v1/namespaces/share/pods/{pod}/eviction` | 200, then 201 |
+| Fence | `DELETE` each pod still on the node with `gracePeriodSeconds=0`; SPIRE `Agent/BanAgent`; `DELETE /api/v1/nodes/{node}`; KMS `TrentService.DisableKey`; Talos `MachineService/Reset` | 200, OK, 200, 200, OK |
+| Release | Kilima `POST /v1/leases/{id}/release` | 204 |
+
+Kilima publishes no API, so its lease API is this design's own. A call that fails is shown with
+its status and not retried; every call the controller makes in both scenarios succeeds.
 
 ## What the controller does in a fibre cut
 
@@ -250,7 +333,7 @@ same result.
 
 | Interface | Stub | Real |
 | --- | --- | --- |
-| Kubernetes | Places pods by the rules above | Each PoP's Talos cluster, running the manifests Argo CD applies |
+| Kubernetes | Places pods by the rules above, behind a dummy API server that answers the core/v1 and policy/v1 calls a drain and a fence make | Each PoP's Talos cluster, running the manifests Argo CD applies |
 | Cloud | Writes the next generation per handoff to its site's stream, stores records and intervals, checks coverage when a site rejoins | The circuit workflow, the desired-state stream, ingestion and the reconciler |
 | Chain | The scenario's `agreement-final` events | The contract, with chain indexing following finality |
 | Configuration push | Takes the site's stream from the last order it recorded and hands only a higher generation to the SDN controller | Configuration push streaming from any cell |
@@ -258,7 +341,11 @@ same result.
 | Site log | Holds records and intervals until a data path has been up for five minutes, by its own measure, then ships them | Tables in the site's Postgres, written by each producer and committed on two servers, and a shipper that deletes a batch only once two providers hold it |
 | AAA | Always answers from the site's credential copy, and says so once when the site loses the cloud | FreeRADIUS at the PoP, reading the credential copy that arrives with the site's desired state |
 | Telemetry | A counter rising at a fixed rate | SNMP or gNMI polling |
-| Fabric | Paths, the link, reclaim notices, revoking identities and disk keys, wiping disks | Probes and provider APIs. A partner VM's disks are encrypted under a key Share's KMS holds. The fence revokes the key, then runs `talosctl reset`, so the image cache, logs and volumes can't be read even if the owner copied the disk first |
+| Fabric | Paths and their links and sessions, behind each node's dummy gNMI server | The node's own BFD and BGP state over gNMI |
+| Kilima's lease API | A lease's state and its release | Kilima's API, whatever its shape |
+| SPIRE | BanAgent: the agent cannot call or attest again | The SPIRE server's agent.v1 Agent service |
+| KMS | DisableKey on the partner VM's disk key | Share's KMS. The VM's disks are encrypted under that key, so once it is disabled the image cache, logs and volumes can't be read even if the owner copied the disk first |
+| Talos | Reset: the node's disks are wiped | The node's Talos machine API, as `talosctl reset` calls it |
 
 ## Why run anything on a partner VM
 
@@ -299,7 +386,9 @@ two mirrors never do.
 ## Writing a scenario
 
 A scenario is a TOML file in `scenarios/` with a `name`, a `start` and an `end`, optional `phases`
-(headings on the screen), the events, and what should happen. The event kinds:
+(headings on the screen), the events, and what should happen. The same events can be sent to a
+running controller with `sharectl emit <kind> field=value ...`, a list as comma-separated values.
+The event kinds:
 
 | Kind | Fields | Effect |
 | --- | --- | --- |
@@ -317,9 +406,31 @@ copied from the program's output.
 
 ## What I'd do next
 
+The decisions and the rules are the part that's close to production. What sits around them is a
+harness with real request shapes and dummy answers. Before this runs at a real PoP:
+
+1. Put each endpoint behind an interface, and give the controller real clients for it, a real clock
+   and a real logger. Today it builds the dummies itself and borrows the simulator's clock.
+2. Handle calls that fail. Retry what can be retried, such as an eviction a disruption budget
+   refuses with a 429, and record a decision as failed when its calls don't go through. Today a
+   decision counts as applied before its calls are made, and a failed call is only shown.
+3. Authenticate every call: a Kubernetes service account, signed requests to KMS, a Talos client
+   certificate and a SPIRE identity.
+4. Hold the least privilege the fence needs. Talos can't scope `os:admin` to one node and SPIRE
+   admin is all or nothing, so the controller should ask a narrow fence service to ban the agent
+   and reset the node, not hold those rights itself.
+5. Keep the controller's memory across a restart, so a restart mid-reclaim still fences and
+   releases on time, and let a standby take over through the Kubernetes lease.
+6. Write the decision log to the site's Postgres, where the real site log ships it from.
+7. Subscribe to the node over gNMI (`ON_CHANGE`) instead of polling it, so a flap is reported the
+   moment it happens.
+8. Agree Kilima's lease API with Kilima. Its shape here is this design's own.
+
+Then features:
+
 1. Lease replacement compute from a partner, within a budget, when pods can't be placed.
 2. Fence a dead Share server through its BMC.
-3. Real probes behind the health checks.
+3. Place pods by CPU and memory, not by count.
 
 ## Security
 

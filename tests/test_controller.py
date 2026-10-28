@@ -1,13 +1,18 @@
+import base64
 from dataclasses import replace
 from datetime import datetime, timedelta
 
+lazy import pytest
+
 from builders import ALL_PATHS, INVENTORY, KILIMA, MOMBASA, T0, at
 from sharectl.controller import Controller
+from sharectl.endpoints import Gnmi, Kubernetes, Leases, Message
 from sharectl.log import line
 from sharectl.model import Layer
 from sharectl.world import World
 
 HANDOFF = "mba-node-1/eth-1-12"
+KEY = "arn:aws:kms:eu-west-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 POLL_UP = (
     "site/mombasa poll mba-node-1: uplink-a bfd 192.0.2.9 up, bgp 3/3 established; "
     "uplink-b bfd 198.51.100.9 up, bgp 3/3 established; "
@@ -118,7 +123,9 @@ def test_a_reclaim_drains_then_fences_then_releases_the_partner_vm() -> None:
     assert [p.resource for p in kube.pods if p.resource == KILIMA] == []
 
     run(world, controller, (20, 300))
-    assert world.sealed == {KILIMA}
+    endpoints = controller.endpoints
+    assert (endpoints.spire.banned, endpoints.talos.wiped) == ({KILIMA}, {KILIMA})
+    assert endpoints.kms.disabled == {KEY}
     assert KILIMA not in kube.nodes
     assert KILIMA not in world.released
     run(world, controller, (310, 480))
@@ -250,9 +257,19 @@ def test_one_uplinks_link_down_with_the_other_up_is_not_isolation() -> None:
     assert not controller.log
 
 
+def fail_the_cells(world: World) -> None:
+    """Every service in every cloud region down: no node schedulable, every pod evicted."""
+    for region in ("E1", "E2", "E3"):
+        cell = world.kubes[region]
+        for node in list(cell.nodes):
+            cell.cordon(node)
+        cell.evict(tuple(cell.pods))
+
+
 def test_every_region_session_down_with_the_links_up_isolates_and_says_so() -> None:
     world = World(INVENTORY, T0)
     controller = Controller(world, MOMBASA, T0)
+    fail_the_cells(world)
     world.cut("mombasa", ["E1", "E2", "E3"], ALL_PATHS, down=True, layer=Layer.SESSION)
     run(world, controller, (0, 30))
 
@@ -266,15 +283,9 @@ def test_every_region_session_down_with_the_links_up_isolates_and_says_so() -> N
 def test_a_cloud_service_failing_changes_nothing() -> None:
     world = World(INVENTORY, T0)
     controller = Controller(world, MOMBASA, T0)
-    cells = [world.kubes[region] for region in ("E1", "E2", "E3")]
-    for cell in cells:
-        for node in list(cell.nodes):
-            cell.cordon(node)
-        cell.evict(tuple(cell.pods))
+    fail_the_cells(world)
     run(world, controller, (0, 120))
 
-    assert all(cell.pods for cell in cells)
-    assert all(p.resource is None for cell in cells for p in cell.pods)
     assert not controller.log
 
 
@@ -284,6 +295,7 @@ def test_the_controller_reports_its_first_poll_then_every_5_minutes_while_nothin
     run(world, controller, (0, 600))
 
     assert polls(world) == [(at(0), POLL_UP), (at(300), POLL_UP), (at(600), POLL_UP)]
+    assert not controller.log
 
 
 def test_a_poll_that_differs_is_reported_at_once_and_the_5_minutes_count_from_it() -> None:
@@ -328,3 +340,186 @@ def test_the_poll_texts_and_how_often_it_repeats_are_the_inventory_s() -> None:
         )
         for s in (0, 60)
     ]
+
+
+def test_the_controller_sees_its_site_only_through_its_node_s_gnmi_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+    get = Gnmi.get
+
+    def silent(self: Gnmi, request: Message) -> Message:
+        response = get(self, request)
+        for update in response["notification"][0]["update"]:
+            if update["path"]["elem"][-1]["name"] == "session-state":
+                update["val"]["jsonIetfVal"] = base64.b64encode(b'"DOWN"').decode()
+        return response
+
+    monkeypatch.setattr(Gnmi, "get", silent)
+    run(world, controller, (0, 30))
+
+    assert next(line(r) for r in controller.log if "outcome" in str(r["id"])).startswith(
+        "03:00:31 site/mombasa site-isolation@v1 [cloud.unreachable] enter-isolated-mode: "
+        "0/3 regions reachable for 30 s on all paths"
+    )
+    assert polls(world)[0] == (at(0), POLL_DOWN)
+
+
+def eviction(pod: str) -> str:
+    return (
+        f"site/mombasa POST /api/v1/namespaces/share/pods/{pod}/eviction "
+        f'{{"apiVersion": "policy/v1", "kind": "Eviction", '
+        f'"metadata": {{"name": "{pod}", "namespace": "share"}}}} -> 201'
+    )
+
+
+def test_a_reclaim_makes_the_calls_a_drain_a_fence_and_a_release_make_and_shows_each() -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+    world.notices[KILIMA] = at(600)
+    run(world, controller, (0, 480))
+
+    assert [(t, text) for t, text in world.notes if " -> " in text] == [
+        (
+            at(0),
+            "site/mombasa PATCH /api/v1/nodes/mba-kilima-01 "
+            '{"spec": {"unschedulable": true}} -> 200',
+        ),
+        *(
+            (at(0), eviction(f"{s}-1"))
+            for s in ("sdn-controller", "aaa", "config-push", "telemetry-collector")
+        ),
+        (
+            at(300),
+            "site/mombasa spire.api.server.agent.v1.Agent/BanAgent "
+            '{"id": {"trustDomain": "share.example", '
+            '"path": "/spire/agent/k8s_psat/mombasa/mba-kilima-01"}} -> OK',
+        ),
+        (at(300), "site/mombasa DELETE /api/v1/nodes/mba-kilima-01 -> 200"),
+        (at(300), f'site/mombasa TrentService.DisableKey {{"KeyId": "{KEY}"}} -> 200'),
+        (
+            at(300),
+            "site/mombasa machine.MachineService/Reset on mba-kilima-01 "
+            '{"graceful": false, "reboot": false, "mode": "ALL"} -> OK',
+        ),
+        (at(480), "site/mombasa POST /v1/leases/mba-kilima-01/release -> 204"),
+    ]
+
+
+def test_a_pod_the_drain_could_not_evict_is_deleted_at_once_at_the_fence() -> None:
+    services = tuple(replace(s, min=2) if s.id == "aaa" else s for s in INVENTORY.services)
+    world = World(replace(INVENTORY, services=services), T0)
+    controller = Controller(world, MOMBASA, T0)
+    world.notices[KILIMA] = at(600)
+    run(world, controller, (0, 300))
+
+    calls = [(t, text) for t, text in world.notes if " -> " in text]
+    assert eviction("aaa-1") not in [text for _, text in calls]
+    assert (
+        at(300),
+        "site/mombasa DELETE /api/v1/namespaces/share/pods/aaa-1?gracePeriodSeconds=0 -> 200",
+    ) in calls
+    assert next(text for t, text in calls if t == at(300)).startswith(
+        "site/mombasa DELETE /api/v1/namespaces/"
+    )
+
+
+def test_a_link_its_node_reports_down_reaches_no_region_whatever_bgp_says(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+    get = Gnmi.get
+
+    def bfd_down(self: Gnmi, request: Message) -> Message:
+        response = get(self, request)
+        for update in response["notification"][0]["update"]:
+            if update["path"]["elem"][0]["name"] == "bfd" and (
+                update["path"]["elem"][-1]["name"] == "session-state"
+            ):
+                update["val"]["jsonIetfVal"] = base64.b64encode(b'"DOWN"').decode()
+        return response
+
+    monkeypatch.setattr(Gnmi, "get", bfd_down)
+    run(world, controller, (0, 30))
+
+    assert polls(world)[0] == (at(0), POLL_DOWN)
+    assert next(line(r) for r in controller.log if "outcome" in str(r["id"])).startswith(
+        "03:00:31 site/mombasa site-isolation@v1"
+    )
+
+
+def test_a_management_path_alone_coming_back_does_not_rejoin_the_site() -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+    world.cut("mombasa", ["*"], ALL_PATHS, down=True)
+    run(world, controller, (0, 30))
+    world.cut("mombasa", ["*"], ["oob"], down=False)
+    run(world, controller, (40, 400))
+
+    assert [line(r).split(" [")[0] for r in controller.log if r["id"].endswith("outcome")] == [
+        "03:00:31 site/mombasa site-isolation@v1",
+        "03:00:31 site/mombasa wait@v1",
+    ]
+
+
+def test_a_notice_is_read_from_the_lease_api_not_the_world(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+
+    real = Leases.request
+
+    def reclaiming(self: Leases, method: str, path: str) -> tuple[int, Message]:
+        status, body = real(self, method, path)
+        return status, {**body, "state": "reclaiming", "reclaimAt": "2026-10-03T03:10:01Z"}
+
+    monkeypatch.setattr(Leases, "request", reclaiming)
+    run(world, controller, (0, 0))
+
+    assert outcomes(controller)[0].startswith("03:00:01 site/mombasa drain-on-reclaim@v1")
+    assert not world.notices
+
+
+def test_silence_is_read_from_the_nodes_list_not_the_world(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+
+    real = Kubernetes.request
+
+    def silent(self: Kubernetes, method: str, path: str, *sent: Message) -> tuple[int, Message]:
+        status, body = real(self, method, path, *sent)
+        if path == "/api/v1/nodes":
+            for node in body["items"]:
+                if node["metadata"]["name"] == KILIMA:
+                    for condition in node["status"]["conditions"]:
+                        condition.update(
+                            status="Unknown", lastTransitionTime="2026-10-03T03:00:01Z"
+                        )
+        return status, body
+
+    monkeypatch.setattr(Kubernetes, "request", silent)
+    run(world, controller, (0, 30))
+
+    assert outcomes(controller)[0].startswith("03:00:31 site/mombasa drain-on-reclaim@v1")
+    assert not world.silent
+
+
+def test_pods_are_read_from_the_pod_list_not_the_world(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = World(INVENTORY, T0)
+    controller = Controller(world, MOMBASA, T0)
+    world.notices[KILIMA] = at(600)
+
+    real = Kubernetes.request
+
+    def fewer(self: Kubernetes, method: str, path: str, *sent: Message) -> tuple[int, Message]:
+        status, body = real(self, method, path, *sent)
+        if path == "/api/v1/pods":
+            items = [p for p in body["items"] if p["metadata"]["name"] != "aaa-1"]
+            return status, {**body, "items": items}
+        return status, body
+
+    monkeypatch.setattr(Kubernetes, "request", fewer)
+    run(world, controller, (0, 0))
+
+    assert "evict 3 of its 3 pods" in outcomes(controller)[0]

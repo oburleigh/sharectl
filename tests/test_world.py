@@ -1,7 +1,17 @@
 from dataclasses import replace
 from datetime import timedelta
 
-from builders import ALL_PATHS, DATA_PATHS, INVENTORY, KILIMA, RECREATED, T0, at, recreated_rows
+from builders import (
+    ALL_PATHS,
+    DATA_PATHS,
+    INVENTORY,
+    KILIMA,
+    RECREATED,
+    T0,
+    at,
+    reached,
+    recreated_rows,
+)
 from sharectl.model import DesiredState, Interval, Layer
 from sharectl.stubs import Batch
 from sharectl.world import World
@@ -33,17 +43,15 @@ def test_cutting_every_path_from_a_site_leaves_the_others_reaching_the_regions()
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["*"], ALL_PATHS, down=True)
 
-    assert world.regions_reachable("mombasa") == (0, False)
-    assert world.regions_reachable("barcelona") == (3, True)
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (0, False)
+    assert (reached(world, "barcelona"), world.data_path_up("barcelona")) == (3, True)
 
 
 def test_a_management_path_reaches_the_regions_but_carries_no_data() -> None:
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["*"], DATA_PATHS, down=True)
 
-    assert world.regions_reachable("mombasa") == (3, False)
-    world.advance(at(0))
-    assert world.stable_since("mombasa") is None
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (3, False)
 
 
 def test_a_message_waits_for_a_data_path_then_arrives_at_the_next_tick() -> None:
@@ -147,59 +155,59 @@ def test_aaa_says_nothing_where_no_credential_cache_runs() -> None:
     assert [n for n in world.notes if "aaa" in n[1]] == []
 
 
-def test_each_path_reports_its_link_and_how_many_regions_its_sessions_reach() -> None:
+def test_each_path_reports_its_link_and_reaches_a_region_only_with_its_session() -> None:
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["*"], ["uplink-a"], down=True)
     world.cut("mombasa", ["E1"], ["uplink-b"], down=True, layer=Layer.SESSION)
     world.cut("E2", ["*"], ["oob"], down=True)
 
-    assert world.path_states("mombasa") == [
-        ("uplink-a", False, 0),
-        ("uplink-b", True, 2),
-        ("oob", True, 2),
-    ]
+    assert world.links_up("mombasa") == [("uplink-a", False), ("uplink-b", True), ("oob", True)]
+    assert [
+        [r.id for r in world.inventory.regions if world.reaches("mombasa", r.id, path)]
+        for path in ALL_PATHS
+    ] == [[], ["E2", "E3"], ["E1", "E3"]]
 
 
 def test_sessions_cut_to_named_sites_leave_the_others_reachable() -> None:
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["E1"], ALL_PATHS, down=True, layer=Layer.SESSION)
 
-    assert world.regions_reachable("mombasa") == (2, True)
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (2, True)
 
 
 def test_one_uplinks_link_down_leaves_every_region_reachable_on_the_other() -> None:
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["*"], ["uplink-a"], down=True)
 
-    assert world.regions_reachable("mombasa") == (3, True)
-    assert world.data_links_up("mombasa") == 1
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (3, True)
+    assert [up for _, up in world.links_up("mombasa")] == [False, True, True]
 
 
 def test_a_link_down_takes_every_session_on_it_down() -> None:
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["E1"], DATA_PATHS, down=True)
 
-    assert world.regions_reachable("mombasa") == (3, False)
-    assert world.data_links_up("mombasa") == 0
-    assert world.regions_reachable("barcelona") == (3, True)
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (3, False)
+    assert [up for _, up in world.links_up("mombasa")] == [False, False, True]
+    assert (reached(world, "barcelona"), world.data_path_up("barcelona")) == (3, True)
 
 
 def test_every_region_session_down_leaves_no_region_reachable_with_the_links_up() -> None:
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["E1", "E2", "E3"], ALL_PATHS, down=True, layer=Layer.SESSION)
 
-    assert world.regions_reachable("mombasa") == (0, False)
-    assert world.data_links_up("mombasa") == 2
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (0, False)
+    assert [up for _, up in world.links_up("mombasa")] == [True, True, True]
 
 
 def test_a_session_comes_back_only_with_its_link() -> None:
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["*"], ALL_PATHS, down=True)
     world.cut("mombasa", ["*"], ALL_PATHS, down=False, layer=Layer.SESSION)
-    assert world.regions_reachable("mombasa") == (0, False)
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (0, False)
 
     world.cut("mombasa", ["*"], ALL_PATHS, down=False)
-    assert world.regions_reachable("mombasa") == (3, True)
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (3, True)
 
 
 def test_a_poll_boundary_is_measured_once_however_often_the_clock_lands_on_it() -> None:
@@ -223,24 +231,6 @@ def test_a_site_with_no_collector_running_measures_nothing() -> None:
 
     assert not held(world, "mombasa")
     assert len(held(world, "barcelona")) == 1
-
-
-def test_a_data_path_up_at_boot_counts_as_stable() -> None:
-    world = World(INVENTORY, T0)
-
-    assert world.stable_since("mombasa") == T0 - timedelta(seconds=300)
-
-
-def test_a_data_path_is_stable_since_the_tick_it_is_seen_back() -> None:
-    world = World(INVENTORY, T0)
-    world.cut("mombasa", ["*"], DATA_PATHS, down=True)
-    world.advance(at(0))
-    assert world.stable_since("mombasa") is None
-
-    world.cut("mombasa", ["*"], DATA_PATHS, down=False)
-    world.advance(at(10))
-    world.advance(at(20))
-    assert world.stable_since("mombasa") == at(10)
 
 
 def test_the_kubernetes_and_aaa_lines_are_the_texts_in_the_inventory() -> None:
@@ -268,6 +258,6 @@ def test_a_session_cut_to_every_other_site_leaves_the_links_up_and_no_region() -
     world = World(INVENTORY, T0)
     world.cut("mombasa", ["*"], ALL_PATHS, down=True, layer=Layer.SESSION)
 
-    assert world.regions_reachable("mombasa") == (0, False)
-    assert world.data_links_up("mombasa") == 2
-    assert world.regions_reachable("barcelona") == (3, True)
+    assert (reached(world, "mombasa"), world.data_path_up("mombasa")) == (0, False)
+    assert [up for _, up in world.links_up("mombasa")] == [True, True, True]
+    assert (reached(world, "barcelona"), world.data_path_up("barcelona")) == (3, True)

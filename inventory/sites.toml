@@ -4,6 +4,10 @@
 paths = ["uplink-a", "uplink-b", "oob"]  # every pair of sites is joined by each of these paths
 management_only = ["oob"]            # reach a site for operators; carry no desired state or records
 
+[cluster]
+namespace = "share"                  # where Share's pods run in each site's Kubernetes
+trust_domain = "share.example"       # the SPIFFE trust domain every node's SPIRE agent joins
+
 [telemetry]
 counters = ["ifHCInOctets"]          # polled on every configured handoff
 poll_minutes = 5
@@ -23,20 +27,24 @@ id = "mombasa"
 code = "mba"
 role = "pop"
 
+# A region's BGP neighbour on each path: its edge router, which every PoP's node peers with.
 [[site]]
 id = "E1"
 code = "e1"
 role = "region"
+peers = { uplink-a = "192.0.2.101", uplink-b = "198.51.100.101", oob = "203.0.113.101" }
 
 [[site]]
 id = "E2"
 code = "e2"
 role = "region"
+peers = { uplink-a = "192.0.2.102", uplink-b = "198.51.100.102", oob = "203.0.113.102" }
 
 [[site]]
 id = "E3"
 code = "e3"
 role = "region"
+peers = { uplink-a = "192.0.2.103", uplink-b = "198.51.100.103", oob = "203.0.113.103" }
 
 [[site]]
 id = "cloudflare"
@@ -112,7 +120,14 @@ site = "mombasa"
 kind = "partner-vm"
 provider = "kilima-fibre"
 trust = "attested"                   # a confidential VM whose attestation passed when it joined
-lease = { notice_minutes = 10, paid_by = "share" }
+
+[resource.lease]                     # leased: its owner can reclaim it, so it carries the reclaimable taint
+notice_minutes = 10
+paid_by = "share"
+
+[resource.lease.fence]               # what the fence revokes
+identity = "/spire/agent/k8s_psat/mombasa/mba-kilima-01"     # its SPIRE agent, banned
+disk_key = "arn:aws:kms:eu-west-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"   # its disks' key in Share's KMS, disabled
 
 [[resource]]
 id = "e1-cluster"
